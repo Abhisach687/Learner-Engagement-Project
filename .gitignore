@@ -16,3 +16,6 @@ __pycache__/
 # Ignore logs or debug files
 logs/
 *.log
+
+# Ignore Deep Lake cache
+~/.deeplake/
