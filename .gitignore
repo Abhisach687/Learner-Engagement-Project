@@ -1,0 +1,18 @@
+# Ignore extracted dataset but keep the folder structure
+/data/
+/data/DAiSEE/
+
+# Ignore virtual environment
+venv/
+
+# Ignore Jupyter notebook checkpoints
+notebooks/.ipynb_checkpoints/
+
+# Ignore temporary/system files
+__pycache__/
+*.pyc
+.DS_Store
+
+# Ignore logs or debug files
+logs/
+*.log
