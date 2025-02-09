@@ -1,5 +1,4 @@
 # Ignore extracted dataset but keep the folder structure
-/data/
 /data/DAiSEE/
 
 # Ignore virtual environment
