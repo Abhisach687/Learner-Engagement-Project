@@ -21,3 +21,4 @@ logs/
 
 # Ignore models
 /models/
+/notebooks/models_class
