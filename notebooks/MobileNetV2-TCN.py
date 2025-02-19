@@ -423,9 +423,10 @@ def evaluate_model(model, test_loader):
     model.eval()
     all_preds = []
     all_labels = []
-    with torch.no_grad():
-        for frames, labels in tqdm(test_loader, desc="Evaluating"):
-            # Fix to add memory_format and non_blocking for consistency
+    total_batches = len(test_loader)
+    with torch.no_grad(), autocast(enabled=True, dtype=torch.float16, device_type='cuda'):
+        # Wrap the test_loader iteration with tqdm:
+        for frames, labels in tqdm(test_loader, desc="Evaluating", total=total_batches, dynamic_ncols=True):
             frames = frames.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             outputs = model(frames)
@@ -435,7 +436,7 @@ def evaluate_model(model, test_loader):
             all_labels.append(labels.cpu())
     all_preds = torch.cat(all_preds, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
-    
+
     dims = ["Engagement", "Boredom", "Confusion", "Frustration"]
     for i, dim in enumerate(dims):
         print(f"Classification report for {dim}:")
@@ -466,6 +467,7 @@ if __name__ == "__main__":
     # Step 1: (Optional) Precompute and cache best frames
     train_csv = LABELS_DIR / "TrainLabels.csv"
     val_csv = LABELS_DIR / "ValidationLabels.csv"
+    test_csv = LABELS_DIR / "TestLabels.csv"
     
     cache_file_train = CACHE_DIR / f"precomputed_{Path(train_csv).stem}_frame_30.pkl"
     if not cache_file_train.exists():
@@ -476,6 +478,11 @@ if __name__ == "__main__":
     if not cache_file_val.exists():
         print("Precomputing best frames for validation data...")      
         precompute_best_frames(val_csv, FRAMES_DIR, num_frames=30)
+        
+    cache_file_test = CACHE_DIR / f"precomputed_{Path(test_csv).stem}_frame_30.pkl"
+    if not cache_file_test.exists():
+        print("Precomputing best frames for test data...")
+        precompute_best_frames(test_csv, FRAMES_DIR, num_frames=30)
     
     # Step 2: Run Optuna tuning with early stopping
     n_trials = 10
@@ -611,9 +618,10 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_dataset,
                             batch_size=batch_size,
                             shuffle=False,
-                            num_workers=3,
-                            pin_memory=True,
-                            persistent_workers=False)
+                            num_workers=4,
+                            pin_memory=False,
+                            persistent_workers=False,
+                            prefetch_factor=2)
 
     try:
         evaluate_model(eval_model, test_loader)
