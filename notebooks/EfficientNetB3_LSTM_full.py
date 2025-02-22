@@ -230,36 +230,6 @@ class LSTMModel(nn.Module):
         return out.view(-1, 4, 4)
 
 # ------------------------------
-# (Optional) MobileNetV2-TCN Model for Comparison
-# ------------------------------
-class MobileNetTCN(nn.Module):
-    def __init__(self, hidden_ch=128, freeze_block=0):
-        super(MobileNetTCN, self).__init__()
-        self.mobilenet = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
-        self.freeze_blocks(freeze_block)
-        self.mobilenet.classifier = nn.Identity()
-        self.tcn = nn.Sequential(
-            nn.Conv1d(1280, hidden_ch, kernel_size=3, dilation=2, padding=2),
-            nn.ReLU(),
-            nn.Conv1d(hidden_ch, 16, kernel_size=1)
-        )
-    
-    def freeze_blocks(self, freeze_block):
-        if freeze_block > 0:
-            for i in range(freeze_block):
-                if i < len(self.mobilenet.features):
-                    for param in self.mobilenet.features[i].parameters():
-                        param.requires_grad = False
-    
-    def forward(self, x):
-        batch_size, num_frames, C, H, W = x.size()
-        x_reshaped = x.view(-1, C, H, W)
-        features_reshaped = self.mobilenet(x_reshaped)
-        features = features_reshaped.view(batch_size, num_frames, -1).permute(0, 2, 1)
-        out = self.tcn(features)
-        return out[:, :, -1]
-
-# ------------------------------
 # Checkpointing Functions
 # ------------------------------
 def save_checkpoint(model, optimizer, epoch, best_val_loss, checkpoint_path):
