@@ -1,0 +1,740 @@
+(venv) PS C:\Users\abhis\Downloads\Documents\Learner Engagement Project>  python .\notebooks\EfficientNetB3_LSTM.py
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Precomputing frames: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████| 5358/5358 [00:12<00:00, 442.49it/s]
+Precomputation: Skipped 507 videos out of 5358.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TrainLabels_frame_30.pkl
+Converting file paths to LMDB preprocessed feature tensors...
+100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4851/4851 [2:41:51<00:00,  2.00s/it]
+LMDB database created at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TrainLabels_frame_30
+Precomputing frames: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 1429/1429 [00:16<00:00, 89.03it/s]
+Precomputation: Skipped 0 videos out of 1429.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_ValidationLabels_frame_30.pkl
+Converting file paths to LMDB preprocessed feature tensors...
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1429/1429 [47:07<00:00,  1.98s/it]
+LMDB database created at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_ValidationLabels_frame_30
+Precomputing frames: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 1784/1784 [00:19<00:00, 91.61it/s]
+Precomputation: Skipped 146 videos out of 1784.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TestLabels_frame_30.pkl
+Converting file paths to LMDB preprocessed feature tensors...
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1638/1638 [51:15<00:00,  1.88s/it]
+LMDB database created at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TestLabels_frame_30
+[I 2025-02-22 03:20:19,383] A new study created in RDB with name: efficientnetb3_lstm_study
+Running 10 additional trial(s) to reach 10 successful trials...
+Epoch 1 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:19<00:00, 15.92it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/5 | Train Loss: 1.3847 | Val Loss: 1.3628
+Epoch 2 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.37it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/5 | Train Loss: 1.2773 | Val Loss: 1.2488
+Epoch 3 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 20.19it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/5 | Train Loss: 1.0686 | Val Loss: 1.0778
+Epoch 4 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.44it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/5 | Train Loss: 0.9402 | Val Loss: 1.0347
+Epoch 5 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 5 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 20.08it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 5/5 | Train Loss: 0.9064 | Val Loss: 1.0210
+[I 2025-02-22 03:22:36,120] Trial 0 finished with value: 1.0209620526989829 and parameters: {'num_frames': 30, 'batch_size': 16, 'lr': 1.6144966793316455e-05, 'epochs': 5, 'hidden_size': 128, 'num_lstm_layers': 2}. Best is trial 0 with value: 1.0209620526989829.
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.89it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/4 | Train Loss: 1.2967 | Val Loss: 1.2432
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.78it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/4 | Train Loss: 1.0772 | Val Loss: 1.1164
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.87it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/4 | Train Loss: 0.9571 | Val Loss: 1.0593
+Epoch 4 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.51it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/4 | Train Loss: 0.9086 | Val Loss: 1.0361
+[I 2025-02-22 03:25:17,111] Trial 1 finished with value: 1.0361180342186407 and parameters: {'num_frames': 30, 'batch_size': 4, 'lr': 1.468000823269492e-05, 'epochs': 4, 'hidden_size': 64, 'num_lstm_layers': 1}. Best is trial 0 with value: 1.0209620526989829.
+Epoch 1 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.63it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/5 | Train Loss: 1.3356 | Val Loss: 1.3356
+Epoch 2 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.91it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/5 | Train Loss: 1.2892 | Val Loss: 1.2986
+Epoch 3 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.43it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/5 | Train Loss: 1.2074 | Val Loss: 1.2262
+Epoch 4 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.59it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/5 | Train Loss: 1.0777 | Val Loss: 1.1150
+Epoch 5 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 5 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 19.59it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 5/5 | Train Loss: 0.9662 | Val Loss: 1.0488
+[I 2025-02-22 03:27:30,235] Trial 2 finished with value: 1.04879707369127 and parameters: {'num_frames': 30, 'batch_size': 16, 'lr': 1.1037600821964454e-05, 'epochs': 5, 'hidden_size': 128, 'num_lstm_layers': 2}. Best is trial 0 with value: 1.0209620526989829.
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:46<00:00, 52.73it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/4 | Train Loss: 0.8756 | Val Loss: 0.9992
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:46<00:00, 52.68it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/4 | Train Loss: 0.8175 | Val Loss: 0.9901
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:45<00:00, 52.83it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/4 | Train Loss: 0.8034 | Val Loss: 1.0004
+Epoch 4 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:45<00:00, 53.21it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/4 | Train Loss: 0.7914 | Val Loss: 0.9961
+[I 2025-02-22 03:31:25,478] Trial 3 finished with value: 0.9901455344646606 and parameters: {'num_frames': 30, 'batch_size': 2, 'lr': 0.00028792892134399465, 'epochs': 4, 'hidden_size': 64, 'num_lstm_layers': 1}. Best is trial 3 with value: 0.9901455344646606.
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.87it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/3 | Train Loss: 0.8943 | Val Loss: 0.9999
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.67it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/3 | Train Loss: 0.8236 | Val Loss: 0.9986
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:28<00:00, 42.91it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/3 | Train Loss: 0.8067 | Val Loss: 1.0014
+[I 2025-02-22 03:33:26,341] Trial 4 finished with value: 0.998625641189479 and parameters: {'num_frames': 30, 'batch_size': 4, 'lr': 0.00035677666380745475, 'epochs': 3, 'hidden_size': 64, 'num_lstm_layers': 1}. Best is trial 3 with value: 0.9901455344646606.
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:46<00:00, 51.68it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/5 | Train Loss: 0.8695 | Val Loss: 0.9890
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:45<00:00, 52.90it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/5 | Train Loss: 0.8198 | Val Loss: 1.0030
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:45<00:00, 53.16it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/5 | Train Loss: 0.8032 | Val Loss: 1.0137
+Epoch 4 [Train]:   0%|                                                                                                                       | 0/2426 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2426/2426 [00:45<00:00, 52.92it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/5 | Train Loss: 0.7930 | Val Loss: 1.0035
+Early stopping at epoch 4. Best loss: 0.9890
+[I 2025-02-22 03:37:21,442] Trial 5 finished with value: 0.9889794170147393 and parameters: {'num_frames': 30, 'batch_size': 2, 'lr': 0.00047910134063113615, 'epochs': 5, 'hidden_size': 64, 'num_lstm_layers': 1}. Best is trial 5 with value: 0.9889794170147393.
+Epoch 1 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:14<00:00, 20.29it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/4 | Train Loss: 1.2524 | Val Loss: 1.1680
+Epoch 2 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:14<00:00, 20.30it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/4 | Train Loss: 0.9573 | Val Loss: 1.0221
+Epoch 3 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 20.14it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/4 | Train Loss: 0.8867 | Val Loss: 1.0080
+Epoch 4 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 20.18it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/4 | Train Loss: 0.8708 | Val Loss: 1.0033
+[I 2025-02-22 03:39:06,041] Trial 6 finished with value: 1.0032868862485786 and parameters: {'num_frames': 30, 'batch_size': 16, 'lr': 3.5415663093183544e-05, 'epochs': 4, 'hidden_size': 128, 'num_lstm_layers': 2}. Best is trial 5 with value: 0.9889794170147393.
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.40it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/5 | Train Loss: 0.9204 | Val Loss: 0.9826
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:29<00:00, 40.45it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/5 | Train Loss: 0.8297 | Val Loss: 0.9875
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.32it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/5 | Train Loss: 0.8164 | Val Loss: 0.9953
+Epoch 4 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.22it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/5 | Train Loss: 0.8040 | Val Loss: 0.9958
+Early stopping at epoch 4. Best loss: 0.9826
+[I 2025-02-22 03:41:54,003] Trial 7 finished with value: 0.9826407729536608 and parameters: {'num_frames': 30, 'batch_size': 4, 'lr': 0.00026433478717551197, 'epochs': 5, 'hidden_size': 64, 'num_lstm_layers': 2}. Best is trial 7 with value: 0.9826407729536608.
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.23it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/3 | Train Loss: 0.8960 | Val Loss: 0.9807
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:29<00:00, 40.45it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/3 | Train Loss: 0.8330 | Val Loss: 0.9829
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.14it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/3 | Train Loss: 0.8178 | Val Loss: 0.9860
+[I 2025-02-22 03:44:00,771] Trial 8 finished with value: 0.980650296488202 and parameters: {'num_frames': 30, 'batch_size': 4, 'lr': 0.00046142041717863776, 'epochs': 3, 'hidden_size': 64, 'num_lstm_layers': 2}. Best is trial 8 with value: 0.980650296488202.
+Epoch 1 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:14<00:00, 20.37it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/5 | Train Loss: 0.9728 | Val Loss: 1.0115
+Epoch 2 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:15<00:00, 20.13it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/5 | Train Loss: 0.8467 | Val Loss: 0.9952
+Epoch 3 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:14<00:00, 20.27it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/5 | Train Loss: 0.8211 | Val Loss: 1.0089
+Epoch 4 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:14<00:00, 20.37it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 4/5 | Train Loss: 0.8077 | Val Loss: 1.0073
+Epoch 5 [Train]:   0%|                                                                                                                        | 0/304 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 5 [Train]: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████| 304/304 [00:14<00:00, 20.45it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 5/5 | Train Loss: 0.7968 | Val Loss: 1.0061
+Early stopping at epoch 5. Best loss: 0.9952
+[I 2025-02-22 03:46:10,528] Trial 9 finished with value: 0.9951503854935781 and parameters: {'num_frames': 30, 'batch_size': 16, 'lr': 0.00038388298286766746, 'epochs': 5, 'hidden_size': 64, 'num_lstm_layers': 1}. Best is trial 8 with value: 0.980650296488202.
+Optuna tuning complete. Total successful trials: 10
+Best trial parameters: {'num_frames': 30, 'batch_size': 4, 'lr': 0.00046142041717863776, 'epochs': 3, 'hidden_size': 64, 'num_lstm_layers': 2}
+
+--- Starting Final Training ---
+Final Training: batch_size=4, lr=5e-04, hidden_size=64
+Epoch 1 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.25it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 1/3 | Train Loss: 0.8950 | Val Loss: 0.9881
+Epoch 2 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 39.83it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 2/3 | Train Loss: 0.8283 | Val Loss: 0.9922
+Epoch 3 [Train]:   0%|                                                                                                                       | 0/1213 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1213/1213 [00:30<00:00, 40.00it/s]
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Epoch 3/3 | Train Loss: 0.8153 | Val Loss: 0.9915
+Evaluating:   0%|                                                                                                                             | 0/410 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Evaluating: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 410/410 [00:11<00:00, 35.69it/s]
+Classification report for Engagement:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.000     0.000     0.000         4
+           1      0.000     0.000     0.000        81
+           2      0.495     0.477     0.486       849
+           3      0.390     0.455     0.420       704
+
+    accuracy                          0.443      1638
+   macro avg      0.221     0.233     0.226      1638
+weighted avg      0.424     0.443     0.432      1638
+
+Classification report for Boredom:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.488     0.815     0.611       747
+           1      0.475     0.198     0.280       519
+           2      0.225     0.116     0.154       335
+           3      0.000     0.000     0.000        37
+
+    accuracy                          0.458      1638
+   macro avg      0.297     0.283     0.261      1638
+weighted avg      0.419     0.458     0.399      1638
+
+Classification report for Confusion:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.693     1.000     0.819      1135
+           1      1.000     0.003     0.005       368
+           2      0.000     0.000     0.000       116
+           3      0.000     0.000     0.000        19
+
+    accuracy                          0.694      1638
+   macro avg      0.423     0.251     0.206      1638
+weighted avg      0.705     0.694     0.569      1638
+
+Classification report for Frustration:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.781     1.000     0.877      1279
+           1      0.000     0.000     0.000       280
+           2      0.000     0.000     0.000        56
+           3      0.000     0.000     0.000        23
+
+    accuracy                          0.781      1638
+   macro avg      0.195     0.250     0.219      1638
+weighted avg      0.610     0.781     0.685      1638
+
+
+--- Evaluation Complete ---
+(venv) PS C:\Users\abhis\Downloads\Documents\Learner Engagement Project>
