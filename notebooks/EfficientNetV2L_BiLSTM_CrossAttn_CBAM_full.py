@@ -14,14 +14,14 @@ import torchvision.transforms as transforms
 import pandas as pd
 import pickle
 import io
-import lmdb  # pip install lmdb
+import lmdb 
 import logging
 import sqlite3
 from optuna.pruners import MedianPruner
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
-import timm  # pip install timm
+import timm  
 
 logging.basicConfig(level=logging.INFO)
 
