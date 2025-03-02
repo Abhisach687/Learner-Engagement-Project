@@ -1,8 +1,12 @@
 # Ignore extracted dataset but keep the folder structure
+data/
 /data/DAiSEE/
+flash-attention/
 
 # Ignore virtual environment
 venv/
+venv310/
+
 
 # Ignore Jupyter notebook checkpoints
 notebooks/.ipynb_checkpoints/

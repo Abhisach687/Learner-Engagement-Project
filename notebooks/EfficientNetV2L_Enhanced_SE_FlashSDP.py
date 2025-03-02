@@ -13,7 +13,6 @@ import torch.optim as optim
 import torchvision.transforms as transforms
 import pandas as pd
 import pickle
-import io
 import lmdb  # pip install lmdb
 import logging
 import sqlite3
@@ -22,16 +21,21 @@ from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
 import timm  # pip install timm
+from torch.utils.checkpoint import checkpoint
+import torch.nn.functional as F
+
+# Enable PyTorch built-in Flash SDP (which uses FlashAttention when conditions are met)
+torch.backends.cuda.enable_flash_sdp(True)
 
 logging.basicConfig(level=logging.INFO)
 
 # ------------------------------
 # CONSTANTS & HYPERPARAMETERS
 # ------------------------------
-GRADIENT_ACCUM_STEPS = 4        # Accumulate gradients over mini-batches
+GRADIENT_ACCUM_STEPS = 8
 NUM_FRAMES = 50
-# Progressive resolution schedule: (resolution, epochs)
-PROG_SCHEDULE = [(112, 5), (224, 10), (300, 15)]
+# Progressive schedule: first train at 224x224 then fine-tune at 300x300.
+PROG_SCHEDULE = [(224, 15), (300, 10)]
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
 
@@ -51,6 +55,15 @@ print("Models directory exists:", os.path.exists(MODEL_DIR))
 print("Checkpoint path writable:", os.access(MODEL_DIR, os.W_OK))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
+
+# ------------------------------
+# Custom Collate Function
+# ------------------------------
+def custom_collate_fn(batch):
+    features, labels = zip(*batch)
+    features = torch.stack(features, dim=0)
+    labels = torch.stack(labels, dim=0)
+    return features, labels
 
 # ------------------------------
 # Image Transformations
@@ -82,7 +95,7 @@ def select_impactful_frames(video_folder: Path, num_frames=50):
     return [frame_files[i] for i in indices]
 
 # ------------------------------
-# Precomputation & Caching Functions
+# Precomputation & LMDB Caching Functions
 # ------------------------------
 def precompute_best_frames(csv_file: Path, video_root: Path, num_frames=50, resolution=224):
     data = pd.read_csv(csv_file, dtype=str)
@@ -118,11 +131,9 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=50, resolution=224,
         transform = get_transform(resolution)
     pkl_file = CACHE_DIR / f"precomputed_{csv_file.stem}_frame_{num_frames}_{resolution}.pkl"
     lmdb_path = CACHE_DIR / f"lmdb_{csv_file.stem}_frame_{num_frames}_{resolution}"
-    # If LMDB already exists, return it.
     if (lmdb_path / "data.mdb").exists():
         print(f"LMDB database already exists at {lmdb_path}")
         return lmdb_path
-
     env = lmdb.open(str(lmdb_path), map_size=lmdb_map_size)
     if not pkl_file.exists():
         precompute_best_frames(csv_file, FRAMES_DIR, num_frames=num_frames, resolution=resolution)
@@ -130,15 +141,12 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=50, resolution=224,
         cache = pickle.load(f)
     valid_indices = cache["valid_indices"]
     file_paths_list = cache["precomputed_frames"]
-
-    # Use EfficientNetV2-L (tf variant) from timm with frozen backbone
     backbone = timm.create_model("tf_efficientnetv2_l", pretrained=True)
     backbone.reset_classifier(0)
     backbone.eval()
     backbone.to(device)
     for param in backbone.parameters():
         param.requires_grad = False
-
     print(f"Converting frame paths to LMDB features for {csv_file.stem} at {resolution}x{resolution} ...")
     with env.begin(write=True) as txn:
         for idx, paths in tqdm(enumerate(file_paths_list), total=len(file_paths_list)):
@@ -151,11 +159,10 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=50, resolution=224,
                 tensor = transform(img).unsqueeze(0).to(device)
                 with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
                     feat = backbone(tensor)
-                    feat = feat.squeeze(0).cpu().half().detach()  # ensure detached and on CPU
-                # Convert to NumPy array to avoid pickling issues with torch tensors
+                    feat = feat.squeeze(0).cpu().half().detach()
                 video_features.append(feat.numpy())
             if video_features:
-                video_features_np = np.stack(video_features)  # shape: (num_frames, feature_dim)
+                video_features_np = np.stack(video_features)
                 key = f"video_{valid_indices[idx]}".encode("utf-8")
                 txn.put(key, pickle.dumps(video_features_np))
     env.close()
@@ -178,15 +185,12 @@ class VideoDatasetLMDB(torch.utils.data.Dataset):
         self.num_frames = num_frames
         self.lmdb_path = str(lmdb_path)
         self.env = None
-
     def _init_env(self):
         if self.env is None:
             self.env = lmdb.open(self.lmdb_path, readonly=True, lock=False, readahead=False, meminit=False)
         return self.env
-
     def __len__(self):
         return len(self.data)
-
     def __getitem__(self, idx):
         env = self._init_env()
         original_idx = self.valid_indices[idx]
@@ -197,13 +201,15 @@ class VideoDatasetLMDB(torch.utils.data.Dataset):
                 raise IndexError(f"Key {key} not found in LMDB")
             features_np = pickle.loads(data_bytes)
             features = torch.from_numpy(features_np)
-        labels = self.data.iloc[idx][["Engagement", "Boredom", "Confusion", "Frustration"]].astype(int)
-        return features, torch.tensor(labels.values, dtype=torch.long)
+        labels_array = np.array(self.data.iloc[idx][["Engagement", "Boredom", "Confusion", "Frustration"]].tolist(), dtype=np.int64)
+        labels_tensor = torch.tensor(labels_array, dtype=torch.long)
+        return features, labels_tensor
 
 class VideoDatasetRaw(torch.utils.data.Dataset):
-    def __init__(self, csv_file, video_root, num_frames=50, transform=None):
+    def __init__(self, csv_file, video_root, num_frames=50, transform=None, split="train"):
         self.data = pd.read_csv(csv_file, dtype=str)
         self.data.columns = self.data.columns.str.strip()
+        self.split = split
         pkl_file = CACHE_DIR / f"precomputed_{csv_file.stem}_frame_{num_frames}_raw.pkl"
         if not pkl_file.exists():
             cache = precompute_best_frames(csv_file, video_root, num_frames=num_frames)
@@ -217,10 +223,8 @@ class VideoDatasetRaw(torch.utils.data.Dataset):
         self.data = self.data.iloc[self.valid_indices].reset_index(drop=True)
         self.num_frames = num_frames
         self.transform = transform
-
     def __len__(self):
         return len(self.data)
-
     def __getitem__(self, idx):
         paths = self.file_paths[idx]
         frames = []
@@ -232,138 +236,172 @@ class VideoDatasetRaw(torch.utils.data.Dataset):
             if self.transform:
                 img = self.transform(img)
             frames.append(img)
-        video_tensor = torch.stack(frames)  # (T, C, H, W)
-        labels = self.data.iloc[idx][["Engagement", "Boredom", "Confusion", "Frustration"]].astype(int)
-        return video_tensor, torch.tensor(labels.values, dtype=torch.long)
+        video_tensor = torch.stack(frames)
+        labels_array = np.array(self.data.iloc[idx][["Engagement", "Boredom", "Confusion", "Frustration"]].tolist(), dtype=np.int64)
+        labels_tensor = torch.tensor(labels_array, dtype=torch.long)
+        return video_tensor, labels_tensor
 
 # ------------------------------
-# Focal Loss Implementation
+# Class-Specific Focal Loss
 # ------------------------------
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, reduction="mean"):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
         super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+        if alpha is not None:
+            self.alpha = torch.tensor(alpha, dtype=torch.float32)
+        else:
+            self.alpha = None
+        self.gamma = torch.tensor(gamma, dtype=torch.float32)
         self.reduction = reduction
         self.ce = nn.CrossEntropyLoss(reduction="none")
-    def forward(self, inputs, targets):
-        ce_loss = self.ce(inputs, targets)
-        pt = torch.exp(-ce_loss)
-        loss = self.alpha * ((1 - pt) ** self.gamma) * ce_loss
-        if self.reduction == "mean":
+    def forward(self, logits, target):
+        num_classes = logits.size(1)
+        target_onehot = F.one_hot(target, num_classes=num_classes).float()
+        probs = F.softmax(logits, dim=1)
+        pt = (probs * target_onehot).sum(dim=1)
+        logpt = torch.log(pt + 1e-8)
+        if self.alpha is not None:
+            alpha_t = (self.alpha.to(logits.device) * target_onehot).sum(dim=1)
+        else:
+            alpha_t = 1.0
+        if self.gamma.numel() > 1:
+            gamma_t = (self.gamma.to(logits.device) * target_onehot).sum(dim=1)
+        else:
+            gamma_t = self.gamma.to(logits.device)
+        loss = -alpha_t * ((1 - pt) ** gamma_t) * logpt
+        if self.reduction == 'mean':
             return loss.mean()
-        elif self.reduction == "sum":
+        elif self.reduction == 'sum':
             return loss.sum()
         else:
             return loss
 
+# Create per-head focal loss functions
+loss_engagement  = FocalLoss(alpha=[1.0, 1.0, 1.0, 1.0], gamma=2.5)
+loss_boredom     = FocalLoss(alpha=[1.0, 1.0, 1.0, 1.0], gamma=2.0)
+loss_confusion   = FocalLoss(alpha=[1.0, 1.0, 1.0, 1.0], gamma=1.5)
+loss_frustration = FocalLoss(alpha=[1.0, 1.0, 1.0, 1.0], gamma=2.0)
+
 # ------------------------------
-# CBAM & Cross-Attention Modules
+# Temporal CutMix Data Augmentation
 # ------------------------------
-class CBAM(nn.Module):
-    def __init__(self, channels, reduction=16, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.channel_attention = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),
-            nn.Conv1d(channels, channels // reduction, kernel_size=1, bias=False),
+class TemporalCutMix(nn.Module):
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.p = p
+    def forward(self, video_batch, labels=None):
+        if torch.rand(1).item() > self.p:
+            return video_batch, labels
+        B, T, C, H, W = video_batch.shape
+        rand_indices = torch.randperm(B, device=video_batch.device)
+        t_start = torch.randint(0, T-10, (B,), device=video_batch.device)
+        t_end = t_start + 10
+        for i in range(B):
+            video_batch[i, t_start[i]:t_end[i]] = video_batch[rand_indices[i], t_start[i]:t_end[i]]
+            if labels is not None:
+                labels[i, t_start[i]:t_end[i]] = labels[rand_indices[i], t_start[i]:t_end[i]]
+        return video_batch, labels
+
+# ------------------------------
+# Spatial SE Module (Replacing CBAM)
+# ------------------------------
+class SpatialSELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
             nn.ReLU(),
-            nn.Conv1d(channels // reduction, channels, kernel_size=1, bias=False),
-            nn.Sigmoid()
-        )
-        self.spatial_attention = nn.Sequential(
-            nn.Conv1d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2, bias=False),
+            nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid()
         )
     def forward(self, x):
-        # x: (B, C, T)
-        channel_attn = self.channel_attention(x)
-        x = x * channel_attn
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        spatial_attn = self.spatial_attention(torch.cat([avg_out, max_out], dim=1))
-        x = x * spatial_attn
-        return x
-
-class CrossAttention(nn.Module):
-    def __init__(self, feature_dim):
-        super(CrossAttention, self).__init__()
-        self.query = nn.Linear(feature_dim, feature_dim)
-        self.key = nn.Linear(feature_dim, feature_dim)
-        self.value = nn.Linear(feature_dim, feature_dim)
-        self.softmax = nn.Softmax(dim=-1)
-    def forward(self, spatial_feat, temporal_feat):
-        # spatial_feat: (B, feature_dim)
-        # temporal_feat: (B, feature_dim)
-        query = self.query(spatial_feat).unsqueeze(1)  # (B, 1, feature_dim)
-        key = self.key(temporal_feat).unsqueeze(2)       # (B, feature_dim, 1)
-        attn = self.softmax(torch.bmm(query, key))       # (B, 1, 1)
-        value = self.value(temporal_feat)
-        return attn.squeeze(-1) * value  # (B, feature_dim)
+        y = self.avg_pool(x).transpose(1, 2)
+        y = self.fc(y).transpose(1, 2)
+        return x * y.expand_as(x)
 
 # ------------------------------
-# Model Architecture
+# Temporal Module using PyTorch’s Built-In Flash Attention
 # ------------------------------
-class EfficientNetV2L_BiLSTM_CrossAttn_CBAM(nn.Module):
-    def __init__(self, lstm_hidden=256, lstm_layers=1, dropout_rate=0.5, classifier_hidden=256):
-        super(EfficientNetV2L_BiLSTM_CrossAttn_CBAM, self).__init__()
+class TemporalFlashSDPModule(nn.Module):
+    def __init__(self, input_dim, hidden_size):
+        super(TemporalFlashSDPModule, self).__init__()
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_size, num_layers=2,
+                            bidirectional=True, batch_first=True)
+        self.dropout = nn.Dropout(0.0)
+        self.layer_norm = nn.LayerNorm(2 * hidden_size)
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)  # (B, T, 2*hidden_size)
+        attn_out = F.scaled_dot_product_attention(lstm_out, lstm_out, lstm_out, dropout_p=0.0, is_causal=False)
+        out = self.layer_norm(lstm_out + attn_out)
+        return out
+
+# ------------------------------
+# Enhanced Model Architecture using PyTorch Built-In Flash Attention
+# ------------------------------
+class EfficientNetV2L_Enhanced(nn.Module):
+    def __init__(self, lstm_hidden=512, dropout_rate=0.5, n_heads=4):
+        super(EfficientNetV2L_Enhanced, self).__init__()
+        # Backbone: EfficientNetV2-L with minimal freezing
         self.backbone = timm.create_model("tf_efficientnetv2_l", pretrained=True)
         self.backbone.reset_classifier(0)
-        # Freeze early layers (up to block index 5)
         if hasattr(self.backbone, "blocks"):
             for i, block in enumerate(self.backbone.blocks):
                 if i < 6:
                     for param in block.parameters():
                         param.requires_grad = False
-        # Dynamically set feature dimension based on the backbone
         if hasattr(self.backbone, "num_features"):
             self.feature_dim = self.backbone.num_features
         else:
-            self.feature_dim = 1536  # fallback if attribute not present
-        self.cbam = CBAM(self.feature_dim, reduction=16, kernel_size=7)
-        self.bilstm = nn.LSTM(input_size=self.feature_dim, hidden_size=lstm_hidden,
-                              num_layers=lstm_layers, batch_first=True, bidirectional=True)
-        self.spatial_proj = nn.Linear(self.feature_dim, classifier_hidden)
-        self.temporal_proj = nn.Linear(2 * lstm_hidden, classifier_hidden)
-        self.cross_attn = CrossAttention(classifier_hidden)
+            self.feature_dim = 1536
+        # Use SE for spatial recalibration
+        self.se = SpatialSELayer(channel=self.feature_dim, reduction=16)
+        # Temporal module: BiLSTM + Flash-based attention
+        self.temporal_module = TemporalFlashSDPModule(input_dim=self.feature_dim, hidden_size=lstm_hidden)
+        self.d_model = 2 * lstm_hidden
+        # Project global spatial feature to d_model
+        self.spatial_proj = nn.Linear(self.feature_dim, self.d_model)
+        # Multi-head attention pooling
+        self.cross_attn = nn.MultiheadAttention(embed_dim=self.d_model, num_heads=n_heads, batch_first=True)
+        self.ln_fusion = nn.LayerNorm(self.d_model * 2)
         self.dropout = nn.Dropout(dropout_rate)
-        self.classifier = nn.Linear(classifier_hidden * 2, 16)  # 16 outputs (reshaped to 4x4)
-
+        self.classifier = nn.Linear(self.d_model * 2, 16)  # 16 logits, to be reshaped into (4,4)
+    
     def forward(self, x):
-        # Support both raw image inputs (B, T, C, H, W) and precomputed features (B, T, feature_dim)
         if x.dim() == 5:
-            # Raw images: (B, T, C, H, W)
             B, T, C, H, W = x.size()
-            x = x.view(-1, C, H, W)  # (B*T, C, H, W)
-            features = self.backbone(x)  # (B*T, feature_dim)
-            features = features.view(B, T, self.feature_dim)  # (B, T, feature_dim)
+            x = x.view(-1, C, H, W)
+            features = self.backbone(x)
+            features = features.view(B, T, self.feature_dim)
         elif x.dim() == 3:
-            # Precomputed features: (B, T, feature_dim)
             features = x
             B, T, _ = features.size()
         else:
             raise ValueError("Input tensor must have 3 or 5 dimensions.")
-        # Apply CBAM: convert to (B, feature_dim, T)
-        features = features.permute(0, 2, 1)
-        features = self.cbam(features)
-        features = features.permute(0, 2, 1)  # back to (B, T, feature_dim)
-        # Process temporal information with BiLSTM
-        lstm_out, (h_n, _) = self.bilstm(features)
-        temporal_context = torch.cat((h_n[-2], h_n[-1]), dim=1)  # (B, 2*lstm_hidden)
-        spatial_feature = features.mean(dim=1)  # (B, feature_dim)
-        spatial_proj = self.spatial_proj(spatial_feature)  # (B, classifier_hidden)
-        temporal_proj = self.temporal_proj(temporal_context)  # (B, classifier_hidden)
-        cross_context = self.cross_attn(spatial_proj, temporal_proj)  # (B, classifier_hidden)
-        fusion = torch.cat((spatial_proj, cross_context), dim=1)  # (B, 2*classifier_hidden)
+        # Apply SE: permute to (B, C, T)
+        features_se = self.se(features.permute(0, 2, 1)).permute(0, 2, 1)
+        global_spatial = features_se.mean(dim=1)  # (B, feature_dim)
+        global_spatial_proj = self.spatial_proj(global_spatial)  # (B, d_model)
+        temporal_features = self.temporal_module(features_se)  # (B, T, d_model)
+        # Use global spatial as query for attention pooling
+        query = global_spatial_proj.unsqueeze(1)  # (B, 1, d_model)
+        attn_out, _ = self.cross_attn(query, temporal_features, temporal_features)
+        attn_out = attn_out.squeeze(1)  # (B, d_model)
+        fusion = torch.cat((global_spatial_proj, attn_out), dim=1)  # (B, 2*d_model)
+        fusion = self.ln_fusion(fusion)
         fusion = self.dropout(fusion)
         logits = self.classifier(fusion)  # (B, 16)
-        return logits.view(B, 4, 4)
+        # Reshape logits to (B, 4, 4) and return as 4 separate outputs
+        B = logits.size(0)
+        logits = logits.view(B, 4, 4)
+        # Return separate outputs for each affective state
+        return logits[:, 0], logits[:, 1], logits[:, 2], logits[:, 3]
 
 # ------------------------------
-# Training Function with Progressive Resolution, Mixed Precision & Gradient Accumulation
+# Training Function (Progressive Resolution, Mixed Precision, Grad Accumulation)
 # ------------------------------
 def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size,
                             patience=5, gradient_accum_steps=GRADIENT_ACCUM_STEPS):
-    # Set lower learning rate for backbone parameters using parameter IDs to avoid tensor comparisons
     backbone_params = list(model.backbone.parameters())
     backbone_param_ids = {id(p) for p in backbone_params}
     other_params = [p for p in model.parameters() if id(p) not in backbone_param_ids]
@@ -372,23 +410,18 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
         {"params": other_params, "lr": lr}
     ], weight_decay=1e-4)
     scaler = GradScaler()
-    focal_loss = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA).to(device)
     best_val_loss = float('inf')
     early_stop_counter = 0
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    
     current_epoch = 0
     for res, ep in PROG_SCHEDULE:
         transform = get_transform(res)
-        train_lmdb = convert_pkl_to_lmdb(train_csv, num_frames=NUM_FRAMES, resolution=res,
-                                          transform=transform, lmdb_map_size=1 * 1024**3)
-        val_lmdb = convert_pkl_to_lmdb(val_csv, num_frames=NUM_FRAMES, resolution=res,
-                                        transform=transform, lmdb_map_size=1 * 1024**3)
+        train_lmdb = convert_pkl_to_lmdb(train_csv, num_frames=NUM_FRAMES, resolution=res, transform=transform)
+        val_lmdb = convert_pkl_to_lmdb(val_csv, num_frames=NUM_FRAMES, resolution=res, transform=transform)
         train_set = VideoDatasetLMDB(train_csv, train_lmdb, num_frames=NUM_FRAMES, resolution=res)
         val_set = VideoDatasetLMDB(val_csv, val_lmdb, num_frames=NUM_FRAMES, resolution=res)
-        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-        val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-        
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True, collate_fn=custom_collate_fn)
+        val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True, collate_fn=custom_collate_fn)
         for epoch in range(ep):
             print(f"Progressive Training: Epoch {current_epoch+1}/{total_epochs} at resolution {res}x{res}")
             model.train()
@@ -396,11 +429,14 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
             for i, (features, labels) in enumerate(tqdm(train_loader, desc="Training")):
                 features = features.to(device, non_blocking=True)
                 labels = labels.to(device, non_blocking=True)
+                if labels.dim() == 1:
+                    labels = labels.unsqueeze(0)
                 with autocast(device_type='cuda', dtype=torch.float16):
-                    outputs = model(features)
-                    outputs = outputs.view(outputs.size(0), 4, 4)
-                    # Compute loss over the 4 outputs
-                    loss = sum(focal_loss(outputs[:, d], labels[:, d]) for d in range(4)) / 4.0
+                    out_eng, out_bor, out_conf, out_frust = model(features)
+                    loss = (loss_engagement(out_eng, labels[:, 0]) +
+                            loss_boredom(out_bor, labels[:, 1]) +
+                            loss_confusion(out_conf, labels[:, 2]) +
+                            loss_frustration(out_frust, labels[:, 3])) / 4.0
                 scaler.scale(loss / gradient_accum_steps).backward()
                 if (i + 1) % gradient_accum_steps == 0:
                     scaler.step(optimizer)
@@ -408,26 +444,27 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                     scaler.update()
                     optimizer.zero_grad()
                 running_loss += loss.item() * features.size(0)
-                del features, labels, outputs, loss
+                del features, labels, out_eng, out_bor, out_conf, out_frust, loss
                 if (i + 1) % 30 == 0:
                     torch.cuda.empty_cache()
                     gc.collect()
             train_loss = running_loss / len(train_loader.dataset)
-            
-            # Validation phase
             model.eval()
             val_loss = 0.0
             with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
                 for features, labels in val_loader:
                     features = features.to(device, non_blocking=True)
                     labels = labels.to(device, non_blocking=True)
-                    outputs = model(features)
-                    outputs = outputs.view(outputs.size(0), 4, 4)
-                    loss = sum(focal_loss(outputs[:, d], labels[:, d]) for d in range(4)) / 4.0
+                    if labels.dim() == 1:
+                        labels = labels.unsqueeze(0)
+                    out_eng, out_bor, out_conf, out_frust = model(features)
+                    loss = (loss_engagement(out_eng, labels[:, 0]) +
+                            loss_boredom(out_bor, labels[:, 1]) +
+                            loss_confusion(out_conf, labels[:, 2]) +
+                            loss_frustration(out_frust, labels[:, 3])) / 4.0
                     val_loss += loss.item() * features.size(0)
             val_loss /= len(val_loader.dataset)
             print(f"Epoch {current_epoch+1}/{total_epochs} at {res}x{res} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-            
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 state = {
@@ -456,26 +493,37 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
 from sklearn.metrics import classification_report, confusion_matrix
 def evaluate_model(model, test_loader):
     model.eval()
-    all_preds = []
-    all_labels = []
+    all_preds = {0:[], 1:[], 2:[], 3:[]}
+    all_labels = {0:[], 1:[], 2:[], 3:[]}
     with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
         for frames, labels in tqdm(test_loader, desc="Evaluating"):
             frames = frames.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            outputs = model(frames)
-            outputs = outputs.view(outputs.size(0), 4, 4)
-            preds = torch.argmax(outputs, dim=2)
-            all_preds.append(preds.cpu())
-            all_labels.append(labels.cpu())
-    all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
-    for i, metric in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
-        print(f"Classification report for {metric}:")
-        print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
-        cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
+            if labels.dim() == 1:
+                labels = labels.unsqueeze(0)
+            out_eng, out_bor, out_conf, out_frust = model(frames)
+            pred_eng = torch.argmax(out_eng, dim=1)
+            pred_bor = torch.argmax(out_bor, dim=1)
+            pred_conf = torch.argmax(out_conf, dim=1)
+            pred_frust = torch.argmax(out_frust, dim=1)
+            all_preds[0].append(pred_eng.cpu())
+            all_preds[1].append(pred_bor.cpu())
+            all_preds[2].append(pred_conf.cpu())
+            all_preds[3].append(pred_frust.cpu())
+            all_labels[0].append(labels[:, 0].cpu())
+            all_labels[1].append(labels[:, 1].cpu())
+            all_labels[2].append(labels[:, 2].cpu())
+            all_labels[3].append(labels[:, 3].cpu())
+    for k in all_preds.keys():
+        all_preds[k] = torch.cat(all_preds[k]).numpy()
+        all_labels[k] = torch.cat(all_labels[k]).numpy()
+    for i, state in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
+        print(f"Classification report for {state}:")
+        print(classification_report(all_labels[i], all_preds[i], digits=3))
+        cm = confusion_matrix(all_labels[i], all_preds[i])
         plt.figure(figsize=(6, 5))
         plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-        plt.title(f"Confusion Matrix for {metric}")
+        plt.title(f"Confusion Matrix for {state}")
         plt.colorbar()
         plt.xticks(np.arange(cm.shape[0]), np.arange(cm.shape[0]))
         plt.yticks(np.arange(cm.shape[1]), np.arange(cm.shape[1]))
@@ -489,14 +537,13 @@ def evaluate_model(model, test_loader):
 # ------------------------------
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method('spawn')
-    
     # CSV file paths
     train_csv = LABELS_DIR / "TrainLabels.csv"
     val_csv = LABELS_DIR / "ValidationLabels.csv"
     test_csv = LABELS_DIR / "TestLabels.csv"
     
-    # Precompute caches and LMDB for each resolution
-    resolutions = [112, 224, 300]
+    # Precompute caches and LMDB databases for resolutions 224 and 300
+    resolutions = [224, 300]
     for csv in [train_csv, val_csv, test_csv]:
         for res in resolutions:
             precompute_best_frames(csv, FRAMES_DIR, num_frames=NUM_FRAMES, resolution=res)
@@ -504,20 +551,19 @@ if __name__ == "__main__":
                                 transform=get_transform(res), lmdb_map_size=1 * 1024**3)
     
     # ------------------------------
-    # Hyperparameter Tuning using Progressive Training over All 3 Resolutions
+    # Hyperparameter Tuning using Progressive Training
     # ------------------------------
     def objective(trial):
         torch.cuda.empty_cache()
         gc.collect()
         batch_size = trial.suggest_categorical("batch_size", [4, 8])
         lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-        lstm_hidden = trial.suggest_categorical("lstm_hidden", [256, 512])
-        lstm_layers = trial.suggest_categorical("lstm_layers", [1, 2])
-        dropout_rate = trial.suggest_categorical("dropout_rate", [0.4, 0.5])
+        lstm_hidden = trial.suggest_categorical("lstm_hidden", [512, 768])
+        n_heads = trial.suggest_categorical("n_heads", [4, 8])
+        dropout_rate = trial.suggest_categorical("dropout_rate", [0.5, 0.6])
         total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
-        model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
-                                                       dropout_rate=dropout_rate, classifier_hidden=256).to(device)
-        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}__bilstm_crossattn_cbam_checkpoint.pth"
+        model = EfficientNetV2L_Enhanced(lstm_hidden=lstm_hidden, n_heads=n_heads, dropout_rate=dropout_rate).to(device)
+        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}_enhanced_flashSDP_checkpoint.pth"
         trial_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         loss = progressive_train_model(model, total_epochs, lr, trial_checkpoint, batch_size,
                                        patience=3, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
@@ -525,8 +571,8 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         gc.collect()
         return loss
-    
-    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam.db"
+
+    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_enhanced_flashSDP.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(db_path)
@@ -537,7 +583,7 @@ if __name__ == "__main__":
     study = optuna.create_study(
         direction="minimize",
         pruner=MedianPruner(n_startup_trials=2, n_warmup_steps=10),
-        study_name="efficientnetv2l_bilstm_crossattn_cbam_study",
+        study_name="efficientnetv2l_enhanced_study",
         storage=f"sqlite:///{db_path}",
         load_if_exists=True
     )
@@ -557,18 +603,17 @@ if __name__ == "__main__":
     # Final Training (using raw images for end-to-end fine-tuning)
     # ------------------------------
     total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
-    final_checkpoint = MODEL_DIR / "final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth"
+    final_checkpoint = MODEL_DIR / "final_model_eff_v2l_enhanced_flashSDP_checkpoint.pth"
     if not final_checkpoint.exists():
         print("\n--- Starting Final Training ---")
         params = best_trial.params
         batch_size = params.get("batch_size", 4)
         lr = params.get("lr", 1e-4)
-        lstm_hidden = params.get("lstm_hidden", 256)
-        lstm_layers = params.get("lstm_layers", 1)
+        lstm_hidden = params.get("lstm_hidden", 512)
+        n_heads = params.get("n_heads", 4)
         dropout_rate = params.get("dropout_rate", 0.5)
-        final_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
-                                                             dropout_rate=dropout_rate, classifier_hidden=256).to(device)
-        # Unfreeze backbone layers after stage 6 for fine-tuning
+        final_model = EfficientNetV2L_Enhanced(lstm_hidden=lstm_hidden, n_heads=n_heads, dropout_rate=dropout_rate).to(device)
+        # Unfreeze additional backbone layers for fine-tuning
         if hasattr(final_model.backbone, "blocks"):
             for i, block in enumerate(final_model.backbone.blocks):
                 if i >= 6:
@@ -582,15 +627,14 @@ if __name__ == "__main__":
         print(f"Using existing model from: {final_checkpoint}")
     
     # ------------------------------
-    # Evaluation on Test Set using Highest Resolution (300x300)
+    # Evaluation on Test Set (300x300)
     # ------------------------------
     test_transform = get_transform(300)
     test_set = VideoDatasetRaw(test_csv, FRAMES_DIR, num_frames=NUM_FRAMES, transform=test_transform)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=best_trial.params.get("lstm_hidden", 256),
-                                                        lstm_layers=best_trial.params.get("lstm_layers", 1),
-                                                        dropout_rate=best_trial.params.get("dropout_rate", 0.5),
-                                                        classifier_hidden=256).to(device)
+    test_loader = DataLoader(test_set, batch_size=4, shuffle=False, num_workers=2, pin_memory=True, collate_fn=custom_collate_fn)
+    eval_model = EfficientNetV2L_Enhanced(lstm_hidden=best_trial.params.get("lstm_hidden", 512),
+                                           n_heads=best_trial.params.get("n_heads", 4),
+                                           dropout_rate=best_trial.params.get("dropout_rate", 0.5)).to(device)
     state = torch.load(final_checkpoint, map_location=device)
     eval_model.load_state_dict(state["model_state_dict"])
     eval_model.to(device)

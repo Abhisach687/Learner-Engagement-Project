@@ -13,7 +13,6 @@ import torch.optim as optim
 import torchvision.transforms as transforms
 import pandas as pd
 import pickle
-import io
 import lmdb  # pip install lmdb
 import logging
 import sqlite3
@@ -56,6 +55,7 @@ print("Using device:", device)
 # Image Transformations
 # ------------------------------
 def get_transform(resolution):
+    # Here you could add additional augmentations (e.g. RandAugment, MixUp) at higher resolutions.
     return transforms.Compose([
         transforms.Resize((resolution, resolution)),
         transforms.RandomHorizontalFlip(),
@@ -83,6 +83,7 @@ def select_impactful_frames(video_folder: Path, num_frames=50):
 
 # ------------------------------
 # Precomputation & Caching Functions
+# (Assume LMDB files for 112, 224, and 300 already exist)
 # ------------------------------
 def precompute_best_frames(csv_file: Path, video_root: Path, num_frames=50, resolution=224):
     data = pd.read_csv(csv_file, dtype=str)
@@ -118,11 +119,9 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=50, resolution=224,
         transform = get_transform(resolution)
     pkl_file = CACHE_DIR / f"precomputed_{csv_file.stem}_frame_{num_frames}_{resolution}.pkl"
     lmdb_path = CACHE_DIR / f"lmdb_{csv_file.stem}_frame_{num_frames}_{resolution}"
-    # If LMDB already exists, return it.
     if (lmdb_path / "data.mdb").exists():
         print(f"LMDB database already exists at {lmdb_path}")
         return lmdb_path
-
     env = lmdb.open(str(lmdb_path), map_size=lmdb_map_size)
     if not pkl_file.exists():
         precompute_best_frames(csv_file, FRAMES_DIR, num_frames=num_frames, resolution=resolution)
@@ -130,15 +129,12 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=50, resolution=224,
         cache = pickle.load(f)
     valid_indices = cache["valid_indices"]
     file_paths_list = cache["precomputed_frames"]
-
-    # Use EfficientNetV2-L (tf variant) from timm with frozen backbone
     backbone = timm.create_model("tf_efficientnetv2_l", pretrained=True)
     backbone.reset_classifier(0)
     backbone.eval()
     backbone.to(device)
     for param in backbone.parameters():
         param.requires_grad = False
-
     print(f"Converting frame paths to LMDB features for {csv_file.stem} at {resolution}x{resolution} ...")
     with env.begin(write=True) as txn:
         for idx, paths in tqdm(enumerate(file_paths_list), total=len(file_paths_list)):
@@ -151,11 +147,10 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=50, resolution=224,
                 tensor = transform(img).unsqueeze(0).to(device)
                 with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
                     feat = backbone(tensor)
-                    feat = feat.squeeze(0).cpu().half().detach()  # ensure detached and on CPU
-                # Convert to NumPy array to avoid pickling issues with torch tensors
+                    feat = feat.squeeze(0).cpu().half().detach()
                 video_features.append(feat.numpy())
             if video_features:
-                video_features_np = np.stack(video_features)  # shape: (num_frames, feature_dim)
+                video_features_np = np.stack(video_features)
                 key = f"video_{valid_indices[idx]}".encode("utf-8")
                 txn.put(key, pickle.dumps(video_features_np))
     env.close()
@@ -178,15 +173,12 @@ class VideoDatasetLMDB(torch.utils.data.Dataset):
         self.num_frames = num_frames
         self.lmdb_path = str(lmdb_path)
         self.env = None
-
     def _init_env(self):
         if self.env is None:
             self.env = lmdb.open(self.lmdb_path, readonly=True, lock=False, readahead=False, meminit=False)
         return self.env
-
     def __len__(self):
         return len(self.data)
-
     def __getitem__(self, idx):
         env = self._init_env()
         original_idx = self.valid_indices[idx]
@@ -217,10 +209,8 @@ class VideoDatasetRaw(torch.utils.data.Dataset):
         self.data = self.data.iloc[self.valid_indices].reset_index(drop=True)
         self.num_frames = num_frames
         self.transform = transform
-
     def __len__(self):
         return len(self.data)
-
     def __getitem__(self, idx):
         paths = self.file_paths[idx]
         frames = []
@@ -232,7 +222,7 @@ class VideoDatasetRaw(torch.utils.data.Dataset):
             if self.transform:
                 img = self.transform(img)
             frames.append(img)
-        video_tensor = torch.stack(frames)  # (T, C, H, W)
+        video_tensor = torch.stack(frames)
         labels = self.data.iloc[idx][["Engagement", "Boredom", "Confusion", "Frustration"]].astype(int)
         return video_tensor, torch.tensor(labels.values, dtype=torch.long)
 
@@ -258,8 +248,29 @@ class FocalLoss(nn.Module):
             return loss
 
 # ------------------------------
-# CBAM & Cross-Attention Modules
+# Temporal Module: Stacked BiLSTM + Multi-Head Self-Attention
 # ------------------------------
+class TemporalModule(nn.Module):
+    def __init__(self, input_dim, lstm_hidden, n_layers=2, n_heads=4):
+        super(TemporalModule, self).__init__()
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=lstm_hidden, num_layers=n_layers,
+                            batch_first=True, bidirectional=True)
+        # Output dimension = 2 * lstm_hidden
+        self.self_attn1 = nn.MultiheadAttention(embed_dim=2*lstm_hidden, num_heads=n_heads, batch_first=True)
+        self.ln1 = nn.LayerNorm(2*lstm_hidden)
+        self.self_attn2 = nn.MultiheadAttention(embed_dim=2*lstm_hidden, num_heads=n_heads, batch_first=True)
+        self.ln2 = nn.LayerNorm(2*lstm_hidden)
+    
+    def forward(self, x):
+        # x: (B, T, input_dim)
+        lstm_out, _ = self.lstm(x)  # (B, T, 2*lstm_hidden)
+        attn_out1, _ = self.self_attn1(lstm_out, lstm_out, lstm_out)
+        out1 = self.ln1(lstm_out + attn_out1)
+        attn_out2, _ = self.self_attn2(out1, out1, out1)
+        out2 = self.ln2(out1 + attn_out2)
+        return out2  # (B, T, 2*lstm_hidden)
+    
+    # CBAM Module for Temporal Attention 
 class CBAM(nn.Module):
     def __init__(self, channels, reduction=16, kernel_size=7):
         super(CBAM, self).__init__()
@@ -284,76 +295,90 @@ class CBAM(nn.Module):
         x = x * spatial_attn
         return x
 
-class CrossAttention(nn.Module):
-    def __init__(self, feature_dim):
-        super(CrossAttention, self).__init__()
-        self.query = nn.Linear(feature_dim, feature_dim)
-        self.key = nn.Linear(feature_dim, feature_dim)
-        self.value = nn.Linear(feature_dim, feature_dim)
-        self.softmax = nn.Softmax(dim=-1)
-    def forward(self, spatial_feat, temporal_feat):
-        # spatial_feat: (B, feature_dim)
-        # temporal_feat: (B, feature_dim)
-        query = self.query(spatial_feat).unsqueeze(1)  # (B, 1, feature_dim)
-        key = self.key(temporal_feat).unsqueeze(2)       # (B, feature_dim, 1)
-        attn = self.softmax(torch.bmm(query, key))       # (B, 1, 1)
-        value = self.value(temporal_feat)
-        return attn.squeeze(-1) * value  # (B, feature_dim)
 
 # ------------------------------
-# Model Architecture
+# Multi-Head Cross-Attention Block for Fusion
 # ------------------------------
-class EfficientNetV2L_BiLSTM_CrossAttn_CBAM(nn.Module):
-    def __init__(self, lstm_hidden=256, lstm_layers=1, dropout_rate=0.5, classifier_hidden=256):
-        super(EfficientNetV2L_BiLSTM_CrossAttn_CBAM, self).__init__()
+class MultiHeadCrossAttention(nn.Module):
+    def __init__(self, d_model, n_heads=4):
+        super(MultiHeadCrossAttention, self).__init__()
+        self.multihead_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, batch_first=True)
+    
+    def forward(self, query, key, value):
+        # query: (B, 1, d_model), key & value: (B, T, d_model)
+        attn_output, _ = self.multihead_attn(query, key, value)
+        return attn_output  # (B, 1, d_model)
+
+# ------------------------------
+# Enhanced Model Architecture
+# ------------------------------
+class EfficientNetV2L_Enhanced(nn.Module):
+    def __init__(self, lstm_hidden=512, n_heads=4, dropout_rate=0.5):
+        super(EfficientNetV2L_Enhanced, self).__init__()
+        # Backbone: EfficientNetV2-L with minimal freezing (freeze early layers: stages 0-5)
         self.backbone = timm.create_model("tf_efficientnetv2_l", pretrained=True)
         self.backbone.reset_classifier(0)
-        # Freeze early layers (up to block index 5)
         if hasattr(self.backbone, "blocks"):
             for i, block in enumerate(self.backbone.blocks):
                 if i < 6:
                     for param in block.parameters():
                         param.requires_grad = False
-        # Dynamically set feature dimension based on the backbone
         if hasattr(self.backbone, "num_features"):
             self.feature_dim = self.backbone.num_features
         else:
-            self.feature_dim = 1536  # fallback if attribute not present
+            self.feature_dim = 1536
+        
+        # Spatial refinement using CBAM
         self.cbam = CBAM(self.feature_dim, reduction=16, kernel_size=7)
-        self.bilstm = nn.LSTM(input_size=self.feature_dim, hidden_size=lstm_hidden,
-                              num_layers=lstm_layers, batch_first=True, bidirectional=True)
-        self.spatial_proj = nn.Linear(self.feature_dim, classifier_hidden)
-        self.temporal_proj = nn.Linear(2 * lstm_hidden, classifier_hidden)
-        self.cross_attn = CrossAttention(classifier_hidden)
+        
+        # Temporal module: stacked two-layer bidirectional LSTM + multi-head self-attention
+        self.temporal_module = TemporalModule(input_dim=self.feature_dim, lstm_hidden=lstm_hidden,
+                                               n_layers=2, n_heads=n_heads)
+        self.d_model = 2 * lstm_hidden  # output dimension from temporal module
+        
+        # Project global spatial feature (obtained by temporal averaging of CBAM-enhanced features) to d_model
+        self.spatial_proj = nn.Linear(self.feature_dim, self.d_model)
+        
+        # Multi-head cross-attention block to fuse spatial and temporal context
+        self.cross_attn = MultiHeadCrossAttention(d_model=self.d_model, n_heads=n_heads)
+        
+        self.ln_fusion = nn.LayerNorm(self.d_model * 2)
         self.dropout = nn.Dropout(dropout_rate)
-        self.classifier = nn.Linear(classifier_hidden * 2, 16)  # 16 outputs (reshaped to 4x4)
-
+        self.classifier = nn.Linear(self.d_model * 2, 16)
+    
     def forward(self, x):
-        # Support both raw image inputs (B, T, C, H, W) and precomputed features (B, T, feature_dim)
+        # Support raw images (B, T, C, H, W) or precomputed features (B, T, feature_dim)
         if x.dim() == 5:
-            # Raw images: (B, T, C, H, W)
             B, T, C, H, W = x.size()
-            x = x.view(-1, C, H, W)  # (B*T, C, H, W)
+            x = x.view(-1, C, H, W)
             features = self.backbone(x)  # (B*T, feature_dim)
-            features = features.view(B, T, self.feature_dim)  # (B, T, feature_dim)
+            features = features.view(B, T, self.feature_dim)
         elif x.dim() == 3:
-            # Precomputed features: (B, T, feature_dim)
             features = x
             B, T, _ = features.size()
         else:
             raise ValueError("Input tensor must have 3 or 5 dimensions.")
-        # Apply CBAM: convert to (B, feature_dim, T)
-        features = features.permute(0, 2, 1)
-        features = self.cbam(features)
-        features = features.permute(0, 2, 1)  # back to (B, T, feature_dim)
-        # Process temporal information with BiLSTM
-        lstm_out, (h_n, _) = self.bilstm(features)
-        temporal_context = torch.cat((h_n[-2], h_n[-1]), dim=1)  # (B, 2*lstm_hidden)
-        spatial_feature = features.mean(dim=1)  # (B, feature_dim)
-        spatial_proj = self.spatial_proj(spatial_feature)  # (B, classifier_hidden)
-        temporal_proj = self.temporal_proj(temporal_context)  # (B, classifier_hidden)
-        cross_context = self.cross_attn(spatial_proj, temporal_proj)  # (B, classifier_hidden)
-        fusion = torch.cat((spatial_proj, cross_context), dim=1)  # (B, 2*classifier_hidden)
+        
+        # Apply CBAM
+        features_cbam = features.permute(0, 2, 1)  # (B, feature_dim, T)
+        features_cbam = self.cbam(features_cbam)
+        features_cbam = features_cbam.permute(0, 2, 1)  # (B, T, feature_dim)
+        
+        # Global spatial feature: temporal average then project to d_model
+        global_spatial = features_cbam.mean(dim=1)  # (B, feature_dim)
+        global_spatial_proj = self.spatial_proj(global_spatial)  # (B, d_model)
+        
+        # Temporal module: refine temporal context
+        temporal_features = self.temporal_module(features_cbam)  # (B, T, d_model)
+        
+        # Use global spatial projection as query (unsqueeze to shape (B, 1, d_model))
+        query = global_spatial_proj.unsqueeze(1)
+        cross_attn_out = self.cross_attn(query, temporal_features, temporal_features)  # (B, 1, d_model)
+        cross_attn_out = cross_attn_out.squeeze(1)  # (B, d_model)
+        
+        # Fusion: concatenate the spatial and cross-attended temporal context
+        fusion = torch.cat((global_spatial_proj, cross_attn_out), dim=1)  # (B, 2*d_model)
+        fusion = self.ln_fusion(fusion)
         fusion = self.dropout(fusion)
         logits = self.classifier(fusion)  # (B, 16)
         return logits.view(B, 4, 4)
@@ -363,7 +388,7 @@ class EfficientNetV2L_BiLSTM_CrossAttn_CBAM(nn.Module):
 # ------------------------------
 def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size,
                             patience=5, gradient_accum_steps=GRADIENT_ACCUM_STEPS):
-    # Set lower learning rate for backbone parameters using parameter IDs to avoid tensor comparisons
+    # Use parameter ID comparison to separate backbone parameters from new layers.
     backbone_params = list(model.backbone.parameters())
     backbone_param_ids = {id(p) for p in backbone_params}
     other_params = [p for p in model.parameters() if id(p) not in backbone_param_ids]
@@ -376,7 +401,6 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
     best_val_loss = float('inf')
     early_stop_counter = 0
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    
     current_epoch = 0
     for res, ep in PROG_SCHEDULE:
         transform = get_transform(res)
@@ -388,7 +412,6 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
         val_set = VideoDatasetLMDB(val_csv, val_lmdb, num_frames=NUM_FRAMES, resolution=res)
         train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
         val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-        
         for epoch in range(ep):
             print(f"Progressive Training: Epoch {current_epoch+1}/{total_epochs} at resolution {res}x{res}")
             model.train()
@@ -399,7 +422,6 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                 with autocast(device_type='cuda', dtype=torch.float16):
                     outputs = model(features)
                     outputs = outputs.view(outputs.size(0), 4, 4)
-                    # Compute loss over the 4 outputs
                     loss = sum(focal_loss(outputs[:, d], labels[:, d]) for d in range(4)) / 4.0
                 scaler.scale(loss / gradient_accum_steps).backward()
                 if (i + 1) % gradient_accum_steps == 0:
@@ -413,8 +435,6 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                     torch.cuda.empty_cache()
                     gc.collect()
             train_loss = running_loss / len(train_loader.dataset)
-            
-            # Validation phase
             model.eval()
             val_loss = 0.0
             with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
@@ -427,7 +447,6 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                     val_loss += loss.item() * features.size(0)
             val_loss /= len(val_loader.dataset)
             print(f"Epoch {current_epoch+1}/{total_epochs} at {res}x{res} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-            
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 state = {
@@ -489,35 +508,31 @@ def evaluate_model(model, test_loader):
 # ------------------------------
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method('spawn')
-    
     # CSV file paths
     train_csv = LABELS_DIR / "TrainLabels.csv"
     val_csv = LABELS_DIR / "ValidationLabels.csv"
     test_csv = LABELS_DIR / "TestLabels.csv"
-    
-    # Precompute caches and LMDB for each resolution
+    # Precompute caches for all resolutions
     resolutions = [112, 224, 300]
     for csv in [train_csv, val_csv, test_csv]:
         for res in resolutions:
             precompute_best_frames(csv, FRAMES_DIR, num_frames=NUM_FRAMES, resolution=res)
             convert_pkl_to_lmdb(csv, num_frames=NUM_FRAMES, resolution=res,
                                 transform=get_transform(res), lmdb_map_size=1 * 1024**3)
-    
     # ------------------------------
     # Hyperparameter Tuning using Progressive Training over All 3 Resolutions
     # ------------------------------
     def objective(trial):
         torch.cuda.empty_cache()
         gc.collect()
-        batch_size = trial.suggest_categorical("batch_size", [4, 8])
+        batch_size = 8  
         lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-        lstm_hidden = trial.suggest_categorical("lstm_hidden", [256, 512])
-        lstm_layers = trial.suggest_categorical("lstm_layers", [1, 2])
-        dropout_rate = trial.suggest_categorical("dropout_rate", [0.4, 0.5])
+        lstm_hidden = trial.suggest_categorical("lstm_hidden", [512, 768])
+        n_heads = trial.suggest_categorical("n_heads", [4, 8])
+        dropout_rate = trial.suggest_categorical("dropout_rate", [0.5, 0.6])
         total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
-        model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
-                                                       dropout_rate=dropout_rate, classifier_hidden=256).to(device)
-        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}__bilstm_crossattn_cbam_checkpoint.pth"
+        model = EfficientNetV2L_Enhanced(lstm_hidden=lstm_hidden, n_heads=n_heads, dropout_rate=dropout_rate).to(device)
+        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}_enhanced_checkpoint.pth"
         trial_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         loss = progressive_train_model(model, total_epochs, lr, trial_checkpoint, batch_size,
                                        patience=3, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
@@ -525,8 +540,8 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         gc.collect()
         return loss
-    
-    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam.db"
+
+    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam_enhanced.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(db_path)
@@ -552,23 +567,21 @@ if __name__ == "__main__":
     print(f"Optuna tuning complete. Total successful trials: {len(successes)}")
     best_trial = min(successes, key=lambda t: t.value)
     print(f"Best trial parameters: {best_trial.params}")
-    
     # ------------------------------
     # Final Training (using raw images for end-to-end fine-tuning)
     # ------------------------------
     total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
-    final_checkpoint = MODEL_DIR / "final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth"
+    final_checkpoint = MODEL_DIR / "final_model_eff_v2l_enhanced_checkpoint.pth"
     if not final_checkpoint.exists():
         print("\n--- Starting Final Training ---")
         params = best_trial.params
-        batch_size = params.get("batch_size", 4)
+        batch_size = 8
         lr = params.get("lr", 1e-4)
-        lstm_hidden = params.get("lstm_hidden", 256)
-        lstm_layers = params.get("lstm_layers", 1)
+        lstm_hidden = params.get("lstm_hidden", 512)
+        n_heads = params.get("n_heads", 4)
         dropout_rate = params.get("dropout_rate", 0.5)
-        final_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
-                                                             dropout_rate=dropout_rate, classifier_hidden=256).to(device)
-        # Unfreeze backbone layers after stage 6 for fine-tuning
+        final_model = EfficientNetV2L_Enhanced(lstm_hidden=lstm_hidden, n_heads=n_heads, dropout_rate=dropout_rate).to(device)
+        # Unfreeze backbone layers after stage 5 for fine-tuning
         if hasattr(final_model.backbone, "blocks"):
             for i, block in enumerate(final_model.backbone.blocks):
                 if i >= 6:
@@ -580,17 +593,15 @@ if __name__ == "__main__":
     else:
         print("\n--- Skipping Final Training (Checkpoint Exists) ---")
         print(f"Using existing model from: {final_checkpoint}")
-    
     # ------------------------------
     # Evaluation on Test Set using Highest Resolution (300x300)
     # ------------------------------
     test_transform = get_transform(300)
     test_set = VideoDatasetRaw(test_csv, FRAMES_DIR, num_frames=NUM_FRAMES, transform=test_transform)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=best_trial.params.get("lstm_hidden", 256),
-                                                        lstm_layers=best_trial.params.get("lstm_layers", 1),
-                                                        dropout_rate=best_trial.params.get("dropout_rate", 0.5),
-                                                        classifier_hidden=256).to(device)
+    test_loader = DataLoader(test_set, batch_size=8, shuffle=False, num_workers=2, pin_memory=True)
+    eval_model = EfficientNetV2L_Enhanced(lstm_hidden=best_trial.params.get("lstm_hidden", 512),
+                                           n_heads=best_trial.params.get("n_heads", 4),
+                                           dropout_rate=best_trial.params.get("dropout_rate", 0.5)).to(device)
     state = torch.load(final_checkpoint, map_location=device)
     eval_model.load_state_dict(state["model_state_dict"])
     eval_model.to(device)
