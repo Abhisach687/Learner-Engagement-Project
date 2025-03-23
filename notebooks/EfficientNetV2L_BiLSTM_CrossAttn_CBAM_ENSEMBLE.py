@@ -81,6 +81,63 @@ def select_impactful_frames(video_folder: Path, num_frames=50):
     indices = np.linspace(0, total - 1, num_frames, dtype=int)
     return [frame_files[i] for i in indices]
 
+
+def save_evaluation_results(results, confusion_matrices, model_name, save_dir=None):
+    """
+    Save evaluation results and confusion matrices to disk.
+    
+    Args:
+        results: Dictionary of metrics for each emotion category
+        confusion_matrices: Dictionary of confusion matrices for each emotion
+        model_name: Name of the model (e.g., "single_model_tta" or "ensemble")
+        save_dir: Directory to save results (default: BASE_DIR / "results")
+    """
+    if save_dir is None:
+        save_dir = BASE_DIR / "results"
+    
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_dir = save_dir / f"{timestamp}_{model_name}"
+    result_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save metrics to CSV
+    results_df = pd.DataFrame({
+        "Metric": list(results.keys()),
+        "F1_Score": [results[k] for k in results.keys()],
+        "LCRN_Score": [0.579, 0.537, 0.723, 0.735],  # LCRN benchmark
+        "Difference": [results[k] - lcrn for k, lcrn in zip(results.keys(), [0.579, 0.537, 0.723, 0.735])]
+    })
+    results_df.to_csv(result_dir / f"{model_name}_results.csv", index=False)
+    
+    # Save confusion matrices as images
+    for emotion, cm in confusion_matrices.items():
+        plt.figure(figsize=(6, 5))
+        plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+        plt.title(f"Confusion Matrix for {emotion}")
+        plt.colorbar()
+        plt.xticks(np.arange(cm.shape[0]), np.arange(cm.shape[0]))
+        plt.yticks(np.arange(cm.shape[1]), np.arange(cm.shape[1]))
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.tight_layout()
+        plt.savefig(result_dir / f"{model_name}_{emotion}_confusion_matrix.png", dpi=300)
+        plt.close()
+    
+    # Save summary text
+    with open(result_dir / f"{model_name}_summary.txt", "w") as f:
+        f.write(f"Evaluation Results for {model_name}\n")
+        f.write("=" * 40 + "\n\n")
+        f.write("Performance vs LCRN:\n")
+        f.write(f"{'Metric':<12} {'Score':<10} {'LCRN':<10} {'Diff':<10}\n")
+        f.write("-" * 42 + "\n")
+        for metric, score in results.items():
+            lcrn_score = {"Engagement": 0.579, "Boredom": 0.537, "Confusion": 0.723, "Frustration": 0.735}[metric]
+            diff = score - lcrn_score
+            diff_str = f"{diff:.3f}" + (" ✓" if diff > 0 else "")
+            f.write(f"{metric:<12} {score:.3f}      {lcrn_score:.3f}      {diff_str}\n")
+    
+    print(f"\nResults saved to: {result_dir}")
+    return result_dir
+
 # ------------------------------
 # Precomputation & Caching Functions
 # ------------------------------
@@ -450,6 +507,98 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
             current_epoch += 1
     return best_val_loss
 
+
+# ------------------------------
+# Training Function for Multiple Seed Models
+# ------------------------------
+def train_multiple_seed_models(num_models=3, base_params=None):
+    """
+    Train multiple models with identical architecture but different random seeds.
+    
+    Args:
+        num_models: Number of models to train
+        base_params: Base hyperparameters to use for all models
+    
+    Returns:
+        List of checkpoint paths for trained models
+    """
+    # Define seeds for reproducibility
+    seeds = [42, 101, 2023, 9999, 7777][:num_models]
+    checkpoint_paths = []
+    
+    # Use best trial parameters if available, otherwise use defaults
+    if base_params is None:
+        base_params = {
+            "batch_size": 4,
+            "lr": 1e-4,
+            "lstm_hidden": 256,
+            "lstm_layers": 1,
+            "dropout_rate": 0.5
+        }
+    
+    total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
+    
+    for i, seed in enumerate(seeds):
+        print(f"\n--- Training Model {i+1}/{len(seeds)} with Seed {seed} ---")
+        
+        # Set seed for reproducibility
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        
+        # Get lstm_hidden from checkpoint if we're using the final checkpoint as reference
+        reference_hidden = 256
+        if i == 0 and os.path.exists(final_checkpoint):
+            try:
+                ref_state = torch.load(final_checkpoint, map_location='cpu')
+                for key, param in ref_state["model_state_dict"].items():
+                    if key == "bilstm.weight_ih_l0":
+                        reference_hidden = param.shape[0] // 4
+                        print(f"Using reference LSTM hidden size from checkpoint: {reference_hidden}")
+                        break
+            except:
+                print("Could not determine reference hidden size, using default")
+        
+        # Create model with matched architecture
+        model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(
+            lstm_hidden=reference_hidden,
+            lstm_layers=base_params.get("lstm_layers", 1),
+            dropout_rate=base_params.get("dropout_rate", 0.5),
+            classifier_hidden=256
+        ).to(device)
+        
+        # Unfreeze backbone layers after stage 6 for fine-tuning
+        if hasattr(model.backbone, "blocks"):
+            for j, block in enumerate(model.backbone.blocks):
+                if j >= 6:
+                    for param in block.parameters():
+                        param.requires_grad = True
+        
+        # Define checkpoint path for this seed
+        seed_checkpoint = MODEL_DIR / f"seed_{seed}_ensemble_model_checkpoint.pth"
+        seed_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Train the model
+        loss = progressive_train_model(
+            model, 
+            total_epochs, 
+            base_params.get("lr", 1e-4), 
+            seed_checkpoint,
+            base_params.get("batch_size", 4),
+            patience=5, 
+            gradient_accum_steps=GRADIENT_ACCUM_STEPS
+        )
+        
+        checkpoint_paths.append(seed_checkpoint)
+        
+        # Clean up to avoid memory issues
+        del model
+        torch.cuda.empty_cache()
+        gc.collect()
+    
+    return checkpoint_paths
+
 # ------------------------------
 # Evaluation Function
 # ------------------------------
@@ -458,21 +607,48 @@ def evaluate_model(model, test_loader):
     model.eval()
     all_preds = []
     all_labels = []
+    confusion_matrices = {}
+    
     with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
         for frames, labels in tqdm(test_loader, desc="Evaluating"):
             frames = frames.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            outputs = model(frames)
+            
+            # Apply ONLY horizontal flip TTA
+            if frames.dim() == 5:
+                # Original prediction
+                outputs_orig = model(frames)
+                
+                # Horizontal flip
+                h_flipped = torch.flip(frames, dims=[-1])
+                outputs_h = model(h_flipped)
+                
+                # Average the two predictions
+                outputs = (outputs_orig + outputs_h) / 2.0
+            else:
+                outputs = model(frames)
+            
             outputs = outputs.view(outputs.size(0), 4, 4)
             preds = torch.argmax(outputs, dim=2)
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
+    
     all_preds = torch.cat(all_preds, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
+    
+    # Store results for reporting
+    results = {}
+    
     for i, metric in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
         print(f"Classification report for {metric}:")
+        report = classification_report(all_labels[:, i], all_preds[:, i], digits=3, output_dict=True)
         print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
+        results[metric] = report['weighted avg']['f1-score']
+        
         cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
+        confusion_matrices[metric] = cm
+        
+        # Still show the plot during evaluation
         plt.figure(figsize=(6, 5))
         plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
         plt.title(f"Confusion Matrix for {metric}")
@@ -483,6 +659,189 @@ def evaluate_model(model, test_loader):
         plt.ylabel("True")
         plt.tight_layout()
         plt.show()
+    
+    # Print summary for comparison with LCRN
+    print("\n--- Performance Summary vs LCRN ---")
+    lcrn_scores = {
+        "Engagement": 0.579,
+        "Boredom": 0.537,
+        "Confusion": 0.723,
+        "Frustration": 0.735
+    }
+    
+    print(f"{'Metric':<12} {'TTA Score':<10} {'LCRN':<10} {'Diff':<10}")
+    print("-" * 42)
+    for metric, score in results.items():
+        diff = score - lcrn_scores[metric]
+        diff_str = f"{diff:.3f}" + (" ✓" if diff > 0 else "")
+        print(f"{metric:<12} {score:.3f}      {lcrn_scores[metric]:.3f}      {diff_str}")
+    
+    # Save results to disk
+    save_evaluation_results(results, confusion_matrices, "single_model_tta")
+    
+    return results
+
+def efficient_ensemble_evaluate(checkpoint_paths, test_loader, subset_size=0.4, resolution=224):
+    """
+    Efficient ensemble evaluation that's much faster.
+    
+    Args:
+        checkpoint_paths: List of paths to model checkpoints
+        test_loader: DataLoader for test data
+        subset_size: Fraction of test data to evaluate (0.0-1.0)
+        resolution: Resolution to resize images to (lower = faster)
+    """
+    print(f"\n--- Efficient Ensemble Evaluation ({subset_size*100:.0f}% of data at {resolution}×{resolution}) ---")
+    
+    # Create a downsampled transform for faster processing
+    fast_transform = transforms.Compose([
+        transforms.Resize((resolution, resolution)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    # Use all available models for best ensemble performance
+    print(f"Using all {len(checkpoint_paths)} checkpoints for ensemble evaluation")
+    
+    # Load models
+    models = []
+    for i, path in enumerate(checkpoint_paths):
+        print(f"Loading model {i+1}/{len(checkpoint_paths)}: {path}")
+        
+        # First load the checkpoint to determine architecture parameters
+        state = torch.load(path, map_location=device)
+        
+        # Detect LSTM hidden size from the checkpoint
+        lstm_hidden = 256  # Default
+        if "model_state_dict" in state:
+            for key, param in state["model_state_dict"].items():
+                if key == "bilstm.weight_ih_l0":
+                    lstm_hidden = param.shape[0] // 4
+                    print(f"  Detected LSTM hidden size: {lstm_hidden}")
+                    break
+        
+        # Create model with detected parameters
+        model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(
+            lstm_hidden=lstm_hidden, 
+            lstm_layers=1,
+            dropout_rate=0.5, 
+            classifier_hidden=256
+        ).to(device)
+        
+        # Load the state dict
+        model.load_state_dict(state["model_state_dict"])
+        model.eval()
+        models.append(model)
+    
+    # Evaluate ensemble on subset of data
+    all_preds = []
+    all_labels = []
+    
+    # Calculate subset size
+    total_batches = len(test_loader)
+    subset_batches = max(1, int(total_batches * subset_size))
+    print(f"Evaluating on {subset_batches} of {total_batches} batches")
+    
+    with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
+        # Process just a subset of batches
+        for batch_idx, (frames, labels) in enumerate(tqdm(test_loader, desc="Ensemble Evaluation")):
+            if batch_idx >= subset_batches:
+                break
+                
+            frames = frames.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            
+            # If frames need resizing for speed
+            if resolution != 300 and frames.dim() == 5:
+                b, t, c, h, w = frames.shape
+                resized_frames = []
+                
+                # Process each frame in the batch
+                frames_cpu = frames.cpu()  # Move to CPU for PIL processing
+                for i in range(b):
+                    seq = []
+                    for j in range(t):
+                        # Convert to PIL, resize, convert back to tensor
+                        img = transforms.ToPILImage()(frames_cpu[i, j])
+                        img = fast_transform(img)
+                        seq.append(img)
+                    resized_frames.append(torch.stack(seq))
+                
+                frames = torch.stack(resized_frames).to(device)
+            
+            # Get predictions from models (using only original images - no TTA for speed)
+            ensemble_outputs = None
+            
+            for model in models:
+                outputs = model(frames)
+                
+                # Add to ensemble
+                if ensemble_outputs is None:
+                    ensemble_outputs = outputs
+                else:
+                    ensemble_outputs += outputs
+            
+            # Average predictions across models
+            ensemble_outputs /= len(models)
+            
+            # Process predictions
+            ensemble_outputs = ensemble_outputs.view(ensemble_outputs.size(0), 4, 4)
+            preds = torch.argmax(ensemble_outputs, dim=2)
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
+            
+            # Free memory
+            del frames, labels, ensemble_outputs, preds
+            if batch_idx % 5 == 0:
+                torch.cuda.empty_cache()
+    
+    all_preds = torch.cat(all_preds, dim=0).numpy()
+    all_labels = torch.cat(all_labels, dim=0).numpy()
+    
+    # Calculate and display results
+    results = {}
+    confusion_matrices = {}  # Add this line to define the confusion_matrices dictionary
+    
+    for i, metric in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
+        print(f"Ensemble classification report for {metric}:")
+        report = classification_report(all_labels[:, i], all_preds[:, i], digits=3, output_dict=True)
+        print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
+        results[metric] = report['weighted avg']['f1-score']
+        
+        # Calculate and store confusion matrix
+        cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
+        confusion_matrices[metric] = cm
+        
+        # Display confusion matrix
+        plt.figure(figsize=(6, 5))
+        plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+        plt.title(f"Ensemble Confusion Matrix for {metric}")
+        plt.colorbar()
+        plt.xticks(np.arange(cm.shape[0]), np.arange(cm.shape[0]))
+        plt.yticks(np.arange(cm.shape[1]), np.arange(cm.shape[1]))
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        plt.tight_layout()
+        plt.show()
+    
+    # Print summary for comparison with LCRN
+    print("\n--- Efficient Ensemble Results vs LCRN ---")
+    lcrn_scores = {
+        "Engagement": 0.579,
+        "Boredom": 0.537,
+        "Confusion": 0.723,
+        "Frustration": 0.735
+    }
+    
+    print(f"{'Metric':<12} {'Ensemble':<10} {'LCRN':<10} {'Diff':<10}")
+    print("-" * 42)
+    for metric, score in results.items():
+        diff = score - lcrn_scores[metric]
+        diff_str = f"{diff:.3f}" + (" ✓" if diff > 0 else "")
+        print(f"{metric:<12} {score:.3f}      {lcrn_scores[metric]:.3f}      {diff_str}")
+        
+    save_evaluation_results(results, confusion_matrices, "ensemble_evaluation")
+    return results
 
 # ------------------------------
 # Main Execution
@@ -584,17 +943,88 @@ if __name__ == "__main__":
     # ------------------------------
     # Evaluation on Test Set using Highest Resolution (300x300)
     # ------------------------------
+    print("\n--- Starting Evaluation ---")
     test_transform = get_transform(300)
     test_set = VideoDatasetRaw(test_csv, FRAMES_DIR, num_frames=NUM_FRAMES, transform=test_transform)
+    
+    # Reduce batch size for efficiency
+    batch_size = min(best_trial.params.get("batch_size", 4), 2)  # Smaller batch size
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=best_trial.params.get("lstm_hidden", 256),
-                                                        lstm_layers=best_trial.params.get("lstm_layers", 1),
-                                                        dropout_rate=best_trial.params.get("dropout_rate", 0.5),
-                                                        classifier_hidden=256).to(device)
+    
+    # First evaluate using the original final checkpoint with horizontal flip only
+    print(f"Loading model from: {final_checkpoint}")
+    
+    # Detect LSTM hidden size from the checkpoint
     state = torch.load(final_checkpoint, map_location=device)
+    lstm_hidden = 256  # Default
+    for key, param in state["model_state_dict"].items():
+        if key == "bilstm.weight_ih_l0":
+            lstm_hidden = param.shape[0] // 4
+            print(f"Detected LSTM hidden size: {lstm_hidden}")
+            break
+            
+    eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(
+        lstm_hidden=lstm_hidden,
+        lstm_layers=best_trial.params.get("lstm_layers", 1),
+        dropout_rate=best_trial.params.get("dropout_rate", 0.5),
+        classifier_hidden=256
+    ).to(device)
+    
     eval_model.load_state_dict(state["model_state_dict"])
-    eval_model.to(device)
-    evaluate_model(eval_model, test_loader)
+    
+    # Single model evaluation with TTA
+    print("\n--- Evaluating Single Model with TTA ---")
+    single_results = evaluate_model(eval_model, test_loader)
+    
+    # ------------------------------
+    # Define paths to ensemble models
+    # ------------------------------
+    # Check for existing seed model checkpoints
+    ensemble_seed_checkpoints = [
+        MODEL_DIR / f"seed_42_ensemble_model_checkpoint.pth",
+        MODEL_DIR / f"seed_101_ensemble_model_checkpoint.pth",
+        MODEL_DIR / f"seed_2023_ensemble_model_checkpoint.pth"
+    ]
+    
+    # Filter to only include checkpoints that actually exist
+    ensemble_seed_checkpoints = [path for path in ensemble_seed_checkpoints if path.exists()]
+    
+    # If no seed checkpoints found, just duplicate the final checkpoint
+    if not ensemble_seed_checkpoints:
+        print("No seed checkpoints found. Using final checkpoint twice for ensemble.")
+        ensemble_seed_checkpoints = [final_checkpoint]
+    
+    # Then evaluate using the efficient ensemble with all available models
+    print("\n--- Efficient Ensemble Evaluation ---")
+    # Use all seed files + final checkpoint
+    selected_checkpoints = [final_checkpoint] + ensemble_seed_checkpoints
+    print(f"Using {len(selected_checkpoints)} models in ensemble")
+    ensemble_results = efficient_ensemble_evaluate(
+        selected_checkpoints, 
+        test_loader,
+        subset_size=0.4,  # Use 40% of test data to balance more models
+        resolution=224    # Lower resolution for speed
+    )
+    
+    # Print final comparison and save overall results
+    print("\n--- Final Comparison Summary ---")
+    print("Base Full.py (from literature): Frustration 78.1% (beats LCRN)")
+    print("LCRN: Engagement 57.9%, Boredom 53.7%, Confusion 72.3%, Frustration 73.5%")
+    print(f"Our Single Model+TTA: {', '.join([f'{k} {v*100:.1f}%' for k, v in single_results.items()])}")
+    print(f"Our Efficient Ensemble: {', '.join([f'{k} {v*100:.1f}%' for k, v in ensemble_results.items()])}")
+
+    # Save final comparison
+    final_results = {
+        "Single_Model": single_results,
+        "Ensemble": ensemble_results
+    }
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_file = BASE_DIR / "results" / f"{timestamp}_final_comparison.json"
+    with open(results_file, "w") as f:
+        import json
+        json.dump(final_results, f, indent=4)
+    print(f"\nFinal comparison saved to: {results_file}")
+
     torch.cuda.empty_cache()
     gc.collect()
     print("\n--- Evaluation Complete ---")

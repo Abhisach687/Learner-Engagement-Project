@@ -1,0 +1,309 @@
+(venv) PS C:\Users\abhis\Downloads\Documents\Learner Engagement Project> python .\notebooks\EfficientNetV2L_BiLSTM_CrossAttn_CBAM_ENSEMBLE.py
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Precomputing frames for TrainLabels at 112x112: 100%|████████████████████████████████████████████████████████████████████████████| 5358/5358 [00:16<00:00, 316.49it/s]
+Precomputation: Skipped 507 videos out of 5358.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TrainLabels_frame_50_112.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TrainLabels_frame_50_112
+Precomputing frames for TrainLabels at 224x224: 100%|████████████████████████████████████████████████████████████████████████████| 5358/5358 [00:16<00:00, 326.35it/s]
+Precomputation: Skipped 507 videos out of 5358.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TrainLabels_frame_50_224.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TrainLabels_frame_50_224
+Precomputing frames for TrainLabels at 300x300: 100%|████████████████████████████████████████████████████████████████████████████| 5358/5358 [00:15<00:00, 339.22it/s]
+Precomputation: Skipped 507 videos out of 5358.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TrainLabels_frame_50_300.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TrainLabels_frame_50_300
+Precomputing frames for ValidationLabels at 112x112: 100%|███████████████████████████████████████████████████████████████████████| 1429/1429 [00:04<00:00, 308.74it/s]
+Precomputation: Skipped 0 videos out of 1429.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_ValidationLabels_frame_50_112.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_ValidationLabels_frame_50_112
+Precomputing frames for ValidationLabels at 224x224: 100%|███████████████████████████████████████████████████████████████████████| 1429/1429 [00:04<00:00, 290.60it/s]
+Precomputation: Skipped 0 videos out of 1429.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_ValidationLabels_frame_50_224.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_ValidationLabels_frame_50_224
+Precomputing frames for ValidationLabels at 300x300: 100%|███████████████████████████████████████████████████████████████████████| 1429/1429 [00:04<00:00, 300.82it/s]
+Precomputation: Skipped 0 videos out of 1429.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_ValidationLabels_frame_50_300.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_ValidationLabels_frame_50_300
+Precomputing frames for TestLabels at 112x112: 100%|█████████████████████████████████████████████████████████████████████████████| 1784/1784 [00:05<00:00, 329.83it/s]
+Precomputation: Skipped 146 videos out of 1784.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TestLabels_frame_50_112.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TestLabels_frame_50_112
+Precomputing frames for TestLabels at 224x224: 100%|█████████████████████████████████████████████████████████████████████████████| 1784/1784 [00:05<00:00, 331.93it/s]
+Precomputation: Skipped 146 videos out of 1784.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TestLabels_frame_50_224.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TestLabels_frame_50_224
+Precomputing frames for TestLabels at 300x300: 100%|█████████████████████████████████████████████████████████████████████████████| 1784/1784 [00:05<00:00, 333.45it/s]
+Precomputation: Skipped 146 videos out of 1784.
+Precomputed results saved to C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\precomputed_TestLabels_frame_50_300.pkl
+LMDB database already exists at C:\Users\abhis\Downloads\Documents\Learner Engagement Project\cache\lmdb_TestLabels_frame_50_300
+Database created/connected at: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\notebooks\tuning_eff_v2l_bilstm_crossattn_cbam.db
+[I 2025-03-24 01:18:12,519] Using an existing study with name 'efficientnetv2l_bilstm_crossattn_cbam_study' instead of creating a new one.
+Optuna tuning complete. Total successful trials: 30
+Best trial parameters: {'batch_size': 8, 'lr': 1.5663425328968245e-05, 'lstm_hidden': 512, 'lstm_layers': 1, 'dropout_rate': 0.4}
+
+--- Skipping Final Training (Checkpoint Exists) ---
+Using existing model from: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\models\final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth
+
+--- Starting Evaluation ---
+Loading model from: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\models\final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth
+Detected LSTM hidden size: 512
+INFO:timm.models._builder:Loading pretrained weights from Hugging Face hub (timm/tf_efficientnetv2_l.in21k_ft_in1k)
+INFO:timm.models._hub:[timm/tf_efficientnetv2_l.in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+
+--- Evaluating Single Model with TTA ---
+Evaluating:   0%|                                                                                                                             | 0/819 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Evaluating: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 819/819 [59:21<00:00,  4.35s/it]
+Classification report for Engagement:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.000     0.000     0.000         4
+           1      0.000     0.000     0.000        81
+           2      0.518     1.000     0.683       849
+           3      0.000     0.000     0.000       704
+
+    accuracy                          0.518      1638
+   macro avg      0.130     0.250     0.171      1638
+weighted avg      0.269     0.518     0.354      1638
+
+Classification report for Boredom:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.456     1.000     0.626       747
+           1      0.000     0.000     0.000       519
+           2      0.000     0.000     0.000       335
+           3      0.000     0.000     0.000        37
+
+    accuracy                          0.456      1638
+   macro avg      0.114     0.250     0.157      1638
+weighted avg      0.208     0.456     0.286      1638
+
+Classification report for Confusion:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.693     1.000     0.819      1135
+           1      0.000     0.000     0.000       368
+           2      0.000     0.000     0.000       116
+           3      0.000     0.000     0.000        19
+
+    accuracy                          0.693      1638
+   macro avg      0.173     0.250     0.205      1638
+weighted avg      0.480     0.693     0.567      1638
+
+Classification report for Frustration:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.781     1.000     0.877      1279
+           1      0.000     0.000     0.000       280
+           2      0.000     0.000     0.000        56
+           3      0.000     0.000     0.000        23
+
+    accuracy                          0.781      1638
+   macro avg      0.195     0.250     0.219      1638
+weighted avg      0.610     0.781     0.685      1638
+
+
+--- Performance Summary vs LCRN ---
+Metric       TTA Score  LCRN       Diff
+------------------------------------------
+Engagement   0.354      0.579      -0.225
+Boredom      0.286      0.537      -0.251
+Confusion    0.567      0.723      -0.156
+Frustration  0.685      0.735      -0.050
+
+--- Efficient Ensemble Evaluation ---
+Using 4 models in ensemble
+
+--- Efficient Ensemble Evaluation (40% of data at 224×224) ---
+Using all 4 checkpoints for ensemble evaluation
+Loading model 1/4: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\models\final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth
+  Detected LSTM hidden size: 512
+INFO:timm.models._builder:Loading pretrained weights from Hugging Face hub (timm/tf_efficientnetv2_l.in21k_ft_in1k)
+INFO:timm.models._hub:[timm/tf_efficientnetv2_l.in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+Loading model 2/4: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\models\seed_42_ensemble_model_checkpoint.pth
+  Detected LSTM hidden size: 512
+INFO:timm.models._builder:Loading pretrained weights from Hugging Face hub (timm/tf_efficientnetv2_l.in21k_ft_in1k)
+INFO:timm.models._hub:[timm/tf_efficientnetv2_l.in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+Loading model 3/4: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\models\seed_101_ensemble_model_checkpoint.pth
+  Detected LSTM hidden size: 256
+INFO:timm.models._builder:Loading pretrained weights from Hugging Face hub (timm/tf_efficientnetv2_l.in21k_ft_in1k)
+INFO:timm.models._hub:[timm/tf_efficientnetv2_l.in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+Loading model 4/4: C:\Users\abhis\Downloads\Documents\Learner Engagement Project\models\seed_2023_ensemble_model_checkpoint.pth
+  Detected LSTM hidden size: 256
+INFO:timm.models._builder:Loading pretrained weights from Hugging Face hub (timm/tf_efficientnetv2_l.in21k_ft_in1k)
+INFO:timm.models._hub:[timm/tf_efficientnetv2_l.in21k_ft_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+Evaluating on 327 of 819 batches
+Ensemble Evaluation:   0%|                                                                                                                    | 0/819 [00:00<?, ?it/s]Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Models directory exists: True
+Checkpoint path writable: True
+Using device: cuda
+Ensemble Evaluation:  40%|██████████████████████████████████████████▎                                                               | 327/819 [17:32<26:22,  3.22s/it]
+Ensemble classification report for Engagement:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.000     0.000     0.000         2
+           1      0.000     0.000     0.000        33
+           2      0.566     1.000     0.723       370
+           3      0.000     0.000     0.000       249
+
+    accuracy                          0.566       654
+   macro avg      0.141     0.250     0.181       654
+weighted avg      0.320     0.566     0.409       654
+
+Ensemble classification report for Boredom:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.422     1.000     0.594       276
+           1      0.000     0.000     0.000       178
+           2      0.000     0.000     0.000       181
+           3      0.000     0.000     0.000        19
+
+    accuracy                          0.422       654
+   macro avg      0.106     0.250     0.148       654
+weighted avg      0.178     0.422     0.250       654
+
+Ensemble classification report for Confusion:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.772     1.000     0.871       505
+           1      0.000     0.000     0.000       110
+           2      0.000     0.000     0.000        35
+           3      0.000     0.000     0.000         4
+
+    accuracy                          0.772       654
+   macro avg      0.193     0.250     0.218       654
+weighted avg      0.596     0.772     0.673       654
+
+Ensemble classification report for Frustration:
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+C:\Users\abhis\Downloads\Documents\Learner Engagement Project\venv\Lib\site-packages\sklearn\metrics\_classification.py:1565: UndefinedMetricWarning: Precision is ill-defined and being set to 0.0 in labels with no predicted samples. Use `zero_division` parameter to control this behavior.
+  _warn_prf(average, modifier, f"{metric.capitalize()} is", len(result))
+              precision    recall  f1-score   support
+
+           0      0.829     1.000     0.906       542
+           1      0.000     0.000     0.000        93
+           2      0.000     0.000     0.000        12
+           3      0.000     0.000     0.000         7
+
+    accuracy                          0.829       654
+   macro avg      0.207     0.250     0.227       654
+weighted avg      0.687     0.829     0.751       654
+
+
+--- Efficient Ensemble Results vs LCRN ---
+Metric       Ensemble   LCRN       Diff
+------------------------------------------
+Engagement   0.409      0.579      -0.170
+Boredom      0.250      0.537      -0.287
+Confusion    0.673      0.723      -0.050
+Frustration  0.751      0.735      0.016 ✓
+
+--- Final Comparison Summary ---
+Base Full.py (from literature): Frustration 78.1% (beats LCRN)
+LCRN: Engagement 57.9%, Boredom 53.7%, Confusion 72.3%, Frustration 73.5%
+Our Single Model+TTA: Engagement 35.4%, Boredom 28.6%, Confusion 56.7%, Frustration 68.5%
+Our Efficient Ensemble: Engagement 40.9%, Boredom 25.0%, Confusion 67.3%, Frustration 75.1%
+
+--- Evaluation Complete ---
+(venv) PS C:\Users\abhis\Downloads\Documents\Learner Engagement Project> 

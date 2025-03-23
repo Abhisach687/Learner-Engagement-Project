@@ -1,0 +1,10 @@
+Evaluation Results for single_model
+========================================
+
+Performance vs LCRN:
+Metric       Score      LCRN       Diff      
+------------------------------------------
+Engagement   0.354      0.579      -0.225
+Boredom      0.286      0.537      -0.251
+Confusion    0.567      0.723      -0.156
+Frustration  0.685      0.735      -0.050

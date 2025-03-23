@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 GRADIENT_ACCUM_STEPS = 4        # Accumulate gradients over mini-batches
 NUM_FRAMES = 50
 # Progressive resolution schedule: (resolution, epochs)
-PROG_SCHEDULE = [(112, 5), (224, 10), (300, 15)]
+PROG_SCHEDULE = [(112, 5), (168, 5), (224, 12), (300, 8)]
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
 
@@ -239,24 +239,58 @@ class VideoDatasetRaw(torch.utils.data.Dataset):
 # ------------------------------
 # Focal Loss Implementation
 # ------------------------------
-class FocalLoss(nn.Module):
-    def __init__(self, alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA, reduction="mean"):
-        super(FocalLoss, self).__init__()
+class TaskOptimizedFocalLoss(nn.Module):
+    def __init__(self, alpha=FOCAL_ALPHA):
+        super().__init__()
+        # Task-specific gamma values based on performance needs
+        self.gammas = {
+            'engagement': 2.2,  # Slightly higher for engagement (our weakest metric)
+            'boredom': 2.2,     # Slightly higher for boredom (our second weakest)
+            'confusion': 2.0,   # Standard for confusion
+            'frustration': 1.8  # Slightly lower for frustration (already strong)
+        }
+        # Class weights to focus on more difficult classes
+        self.engagement_weights = torch.tensor([1.5, 1.4, 1.0, 1.3])  # More focus on 0,1,3
+        self.boredom_weights = torch.tensor([1.0, 1.2, 1.8, 2.0])     # More focus on 2,3 
+        self.confusion_weights = torch.tensor([1.0, 1.0, 1.1, 1.2])   # Slight boost for 2,3
         self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
+        self.epsilon = 1e-6
         self.ce = nn.CrossEntropyLoss(reduction="none")
+        
     def forward(self, inputs, targets):
-        ce_loss = self.ce(inputs, targets)
-        pt = torch.exp(-ce_loss)
-        loss = self.alpha * ((1 - pt) ** self.gamma) * ce_loss
-        if self.reduction == "mean":
-            return loss.mean()
-        elif self.reduction == "sum":
-            return loss.sum()
-        else:
-            return loss
-
+        batch_size = targets.size(0)
+        task_losses = []
+        
+        # Handle each task separately
+        for task_idx, task_name in enumerate(['engagement', 'boredom', 'confusion', 'frustration']):
+            task_outputs = inputs[:, task_idx]
+            task_targets = targets[:, task_idx]
+            
+            # Get the appropriate gamma for this task
+            gamma = self.gammas[task_name]
+            
+            # Apply class weights based on task
+            if task_name == 'engagement':
+                weights = self.engagement_weights.to(task_outputs.device)[task_targets]
+            elif task_name == 'boredom':
+                weights = self.boredom_weights.to(task_outputs.device)[task_targets]
+            elif task_name == 'confusion':
+                weights = self.confusion_weights.to(task_outputs.device)[task_targets]
+            else:  # frustration
+                weights = torch.ones_like(task_targets).float()  # No weighting needed
+            
+            # Calculate focal loss
+            ce_loss = self.ce(task_outputs, task_targets)
+            pt = torch.exp(-ce_loss)
+            focal_weight = self.alpha * ((1 - pt) ** gamma)
+            
+            # Apply class weights and calculate mean
+            task_loss = weights * focal_weight * ce_loss
+            task_losses.append(task_loss.mean())
+        
+        # Average across tasks
+        return sum(task_losses) / 4.0
+    
 # ------------------------------
 # CBAM & Cross-Attention Modules
 # ------------------------------
@@ -304,7 +338,7 @@ class CrossAttention(nn.Module):
 # Model Architecture
 # ------------------------------
 class EfficientNetV2L_BiLSTM_CrossAttn_CBAM(nn.Module):
-    def __init__(self, lstm_hidden=256, lstm_layers=1, dropout_rate=0.5, classifier_hidden=256):
+    def __init__(self, lstm_hidden=384, lstm_layers=2, dropout_rate=0.5, classifier_hidden=256):
         super(EfficientNetV2L_BiLSTM_CrossAttn_CBAM, self).__init__()
         self.backbone = timm.create_model("tf_efficientnetv2_l", pretrained=True)
         self.backbone.reset_classifier(0)
@@ -363,7 +397,15 @@ class EfficientNetV2L_BiLSTM_CrossAttn_CBAM(nn.Module):
 # ------------------------------
 def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size,
                             patience=5, gradient_accum_steps=GRADIENT_ACCUM_STEPS):
-    # Set lower learning rate for backbone parameters using parameter IDs to avoid tensor comparisons
+    # Resolution-specific learning rates
+    LR_SCHEDULE = {
+        112: lr * 1.2,       # Faster learning at lower resolution
+        168: lr * 1.0,       # Standard learning rate
+        224: lr * 0.8,       # More careful at higher resolution
+        300: lr * 0.5        # Most careful at highest resolution
+    }
+    
+    # Set up optimizer with discriminative learning rates
     backbone_params = list(model.backbone.parameters())
     backbone_param_ids = {id(p) for p in backbone_params}
     other_params = [p for p in model.parameters() if id(p) not in backbone_param_ids]
@@ -371,15 +413,40 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
         {"params": backbone_params, "lr": 1e-5},
         {"params": other_params, "lr": lr}
     ], weight_decay=1e-4)
+    
     scaler = GradScaler()
-    focal_loss = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA).to(device)
+    focal_loss = TaskOptimizedFocalLoss(alpha=FOCAL_ALPHA).to(device)
     best_val_loss = float('inf')
     early_stop_counter = 0
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     
     current_epoch = 0
+    prev_res = None  # Initialize prev_res before the loop
     for res, ep in PROG_SCHEDULE:
+        # Update learning rate for this resolution
+        current_lr = LR_SCHEDULE.get(res, lr)
+        for param_group in optimizer.param_groups:
+            if param_group['params'] == backbone_params:
+                param_group['lr'] = current_lr * 0.1  # Backbone learns 10x slower
+            else:
+                param_group['lr'] = current_lr
+                
+        print(f"Learning rate set to {current_lr} for resolution {res}x{res}")
+        
         transform = get_transform(res)
+
+        # Hot-start from previous resolution if available
+        if res > PROG_SCHEDULE[0][0] and prev_res is not None and best_val_loss < float('inf'):
+            print(f"Hot-starting {res}x{res} from previous best checkpoint")
+            checkpoint_to_load = MODEL_DIR / f"best_res_{prev_res}_nextiter_model.pth"
+            if checkpoint_to_load.exists():
+                print(f"Loading checkpoint from {checkpoint_to_load}")
+                checkpoint = torch.load(checkpoint_to_load, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+        
+        prev_res = res  # Track current resolution for next iteration
+        
+       
         train_lmdb = convert_pkl_to_lmdb(train_csv, num_frames=NUM_FRAMES, resolution=res,
                                           transform=transform, lmdb_map_size=1 * 1024**3)
         val_lmdb = convert_pkl_to_lmdb(val_csv, num_frames=NUM_FRAMES, resolution=res,
@@ -399,8 +466,8 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                 with autocast(device_type='cuda', dtype=torch.float16):
                     outputs = model(features)
                     outputs = outputs.view(outputs.size(0), 4, 4)
-                    # Compute loss over the 4 outputs
-                    loss = sum(focal_loss(outputs[:, d], labels[:, d]) for d in range(4)) / 4.0
+                    # Let TaskOptimizedFocalLoss handle the tasks internally
+                    loss = focal_loss(outputs, labels)
                 scaler.scale(loss / gradient_accum_steps).backward()
                 if (i + 1) % gradient_accum_steps == 0:
                     scaler.step(optimizer)
@@ -422,12 +489,12 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                     features = features.to(device, non_blocking=True)
                     labels = labels.to(device, non_blocking=True)
                     outputs = model(features)
-                    outputs = outputs.view(outputs.size(0), 4, 4)
-                    loss = sum(focal_loss(outputs[:, d], labels[:, d]) for d in range(4)) / 4.0
+                    loss = focal_loss(outputs, labels)
                     val_loss += loss.item() * features.size(0)
             val_loss /= len(val_loader.dataset)
             print(f"Epoch {current_epoch+1}/{total_epochs} at {res}x{res} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
             
+        # After calculating val_loss for this resolution, save the model if it's the best so far
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 state = {
@@ -436,19 +503,25 @@ def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict()
                 }
-                temp_path = checkpoint_path.with_suffix(".tmp")
-                torch.save(state, temp_path, _use_new_zipfile_serialization=False)
-                if checkpoint_path.exists():
-                    checkpoint_path.unlink()
-                temp_path.rename(checkpoint_path)
+                torch.save(state, checkpoint_path)
+                res_checkpoint = MODEL_DIR / f"best_res_nextiter_{res}_model.pth"
+                torch.save(state, res_checkpoint)
+                
+                print(f"New best model saved with val loss: {best_val_loss:.4f}")
                 early_stop_counter = 0
             else:
                 early_stop_counter += 1
+            
             if early_stop_counter >= patience:
                 print(f"Early stopping at epoch {current_epoch+1}. Best val loss: {best_val_loss:.4f}")
-                return best_val_loss
-            current_epoch += 1
+                # Load best model before moving to next resolution
+                state = torch.load(checkpoint_path)
+                model.load_state_dict(state["model_state_dict"])
+                optimizer.load_state_dict(state["optimizer_state_dict"])
+                break  # Exit this resolution's training loop
     return best_val_loss
+
+
 
 # ------------------------------
 # Evaluation Function
@@ -461,17 +534,37 @@ def evaluate_model(model, test_loader):
     with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
         for frames, labels in tqdm(test_loader, desc="Evaluating"):
             frames = frames.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            
+            # Standard prediction
             outputs = model(frames)
+            
+            # Apply TTA only for raw frames (not features)
+            if frames.dim() == 5:  # (B, T, C, H, W)
+                # Horizontal flip
+                flipped = torch.flip(frames, dims=[-1])
+                outputs_flip = model(flipped)
+                
+                # Combine predictions
+                outputs = (outputs + outputs_flip) / 2.0
+            
+            # Process outputs
             outputs = outputs.view(outputs.size(0), 4, 4)
             preds = torch.argmax(outputs, dim=2)
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
+    
     all_preds = torch.cat(all_preds, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
+    
+    # Calculate and report metrics as before
+    metrics = {}
     for i, metric in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
         print(f"Classification report for {metric}:")
+        report = classification_report(all_labels[:, i], all_preds[:, i], digits=3, output_dict=True)
+        metrics[metric] = report['weighted avg']['f1-score'] * 100
         print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
+        
+        # Confusion matrix printing (unchanged)
         cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
         plt.figure(figsize=(6, 5))
         plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
@@ -483,6 +576,17 @@ def evaluate_model(model, test_loader):
         plt.ylabel("True")
         plt.tight_layout()
         plt.show()
+    
+    # Compare with LCRN benchmark
+    print("\n=== PERFORMANCE COMPARISON WITH DAISEE LCRN ===")
+    print(f"Metric      | This Model | LCRN Benchmark | Difference")
+    print(f"-----------+-----------+---------------+-----------")
+    print(f"Engagement  | {metrics['Engagement']:.1f}%     | 57.9%         | {(metrics['Engagement'] - 57.9):.1f}%")
+    print(f"Boredom     | {metrics['Boredom']:.1f}%     | 53.7%         | {(metrics['Boredom'] - 53.7):.1f}%")
+    print(f"Confusion   | {metrics['Confusion']:.1f}%     | 72.3%         | {(metrics['Confusion'] - 72.3):.1f}%") 
+    print(f"Frustration | {metrics['Frustration']:.1f}%     | 73.5%         | {(metrics['Frustration'] - 73.5):.1f}%")
+    
+    return metrics
 
 # ------------------------------
 # Main Execution
@@ -496,7 +600,7 @@ if __name__ == "__main__":
     test_csv = LABELS_DIR / "TestLabels.csv"
     
     # Precompute caches and LMDB for each resolution
-    resolutions = [112, 224, 300]
+    resolutions = [112, 168, 224, 300]
     for csv in [train_csv, val_csv, test_csv]:
         for res in resolutions:
             precompute_best_frames(csv, FRAMES_DIR, num_frames=NUM_FRAMES, resolution=res)
@@ -510,23 +614,26 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         gc.collect()
         batch_size = trial.suggest_categorical("batch_size", [4, 8])
-        lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-        lstm_hidden = trial.suggest_categorical("lstm_hidden", [256, 512])
-        lstm_layers = trial.suggest_categorical("lstm_layers", [1, 2])
-        dropout_rate = trial.suggest_categorical("dropout_rate", [0.4, 0.5])
+        lr = trial.suggest_float("lr", 1e-5, 1e-4, log=True)  # Narrower, more focused range
+        
+        # Fixed parameters from best model (001)
+        lstm_hidden = 384  # Fixed based on best model (was 256)
+        lstm_layers = 2    # Fixed based on best model (was 1)
+        
+        dropout_rate = trial.suggest_float("dropout_rate", 0.4, 0.5)
         total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
         model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
-                                                       dropout_rate=dropout_rate, classifier_hidden=256).to(device)
-        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}__bilstm_crossattn_cbam_checkpoint.pth"
+                                                    dropout_rate=dropout_rate, classifier_hidden=256).to(device)
+        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}__bilstm_crossattn_cbam_nextiter_checkpoint.pth"
         trial_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         loss = progressive_train_model(model, total_epochs, lr, trial_checkpoint, batch_size,
-                                       patience=3, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
+                                        patience=3, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
         del model
         torch.cuda.empty_cache()
         gc.collect()
         return loss
     
-    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam.db"
+    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam_nextiter.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(db_path)
@@ -557,17 +664,16 @@ if __name__ == "__main__":
     # Final Training (using raw images for end-to-end fine-tuning)
     # ------------------------------
     total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
-    final_checkpoint = MODEL_DIR / "final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth"
+    final_checkpoint = MODEL_DIR / "final_model_eff_v2l__bilstm_crossattn_cbam_nextiter_checkpoint.pth"
     if not final_checkpoint.exists():
         print("\n--- Starting Final Training ---")
         params = best_trial.params
         batch_size = params.get("batch_size", 4)
         lr = params.get("lr", 1e-4)
-        lstm_hidden = params.get("lstm_hidden", 256)
-        lstm_layers = params.get("lstm_layers", 1)
+        lstm_hidden = 384  # Fixed value for best performance
+        lstm_layers = 2    # Fixed value for best performance
         dropout_rate = params.get("dropout_rate", 0.5)
-        final_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
-                                                             dropout_rate=dropout_rate, classifier_hidden=256).to(device)
+        final_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers, dropout_rate=dropout_rate, classifier_hidden=256).to(device)
         # Unfreeze backbone layers after stage 6 for fine-tuning
         if hasattr(final_model.backbone, "blocks"):
             for i, block in enumerate(final_model.backbone.blocks):
@@ -587,10 +693,12 @@ if __name__ == "__main__":
     test_transform = get_transform(300)
     test_set = VideoDatasetRaw(test_csv, FRAMES_DIR, num_frames=NUM_FRAMES, transform=test_transform)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=best_trial.params.get("lstm_hidden", 256),
-                                                        lstm_layers=best_trial.params.get("lstm_layers", 1),
-                                                        dropout_rate=best_trial.params.get("dropout_rate", 0.5),
-                                                        classifier_hidden=256).to(device)
+    eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(
+        lstm_hidden=384,  # Use fixed value instead of best_trial.params.get("lstm_hidden", 256)
+        lstm_layers=2,    # Use fixed value instead of best_trial.params.get("lstm_layers", 1)
+        dropout_rate=best_trial.params.get("dropout_rate", 0.5),
+        classifier_hidden=256
+    ).to(device)
     state = torch.load(final_checkpoint, map_location=device)
     eval_model.load_state_dict(state["model_state_dict"])
     eval_model.to(device)

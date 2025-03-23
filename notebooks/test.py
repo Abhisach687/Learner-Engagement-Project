@@ -1,7 +1,7 @@
 import sqlite3
 import os
 
-db_path = r"C:/Users/abhis/Downloads/Documents/Learner Engagement Project/tuning_eff.db"
+db_path = r"C:/Users/abhis/Downloads/Documents/Learner Engagement Project/notebooks/tuning_effv2l_bilstm_flow_ema.db"
 
 def debug_database():
     if not os.path.exists(db_path):

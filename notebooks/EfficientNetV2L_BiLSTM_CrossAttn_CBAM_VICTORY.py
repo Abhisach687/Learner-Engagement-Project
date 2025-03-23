@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 GRADIENT_ACCUM_STEPS = 4        # Accumulate gradients over mini-batches
 NUM_FRAMES = 50
 # Progressive resolution schedule: (resolution, epochs)
-PROG_SCHEDULE = [(112, 5), (224, 10), (300, 15)]
+PROG_SCHEDULE = [(112, 4), (224, 12), (300, 16)]  # Total: 32 epochs
 FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
 
@@ -362,15 +362,15 @@ class EfficientNetV2L_BiLSTM_CrossAttn_CBAM(nn.Module):
 # Training Function with Progressive Resolution, Mixed Precision & Gradient Accumulation
 # ------------------------------
 def progressive_train_model(model, total_epochs, lr, checkpoint_path, batch_size,
-                            patience=5, gradient_accum_steps=GRADIENT_ACCUM_STEPS):
+                            patience=7, gradient_accum_steps=GRADIENT_ACCUM_STEPS):
     # Set lower learning rate for backbone parameters using parameter IDs to avoid tensor comparisons
     backbone_params = list(model.backbone.parameters())
     backbone_param_ids = {id(p) for p in backbone_params}
     other_params = [p for p in model.parameters() if id(p) not in backbone_param_ids]
     optimizer = optim.AdamW([
-        {"params": backbone_params, "lr": 1e-5},
-        {"params": other_params, "lr": lr}
-    ], weight_decay=1e-4)
+        {"params": backbone_params, "lr": 8e-6},  # Slightly lower for backbone
+        {"params": other_params, "lr": min(lr, 8e-5)}  # Cap at 8e-5 but respect trial param if lower
+    ], weight_decay=1e-4)  
     scaler = GradScaler()
     focal_loss = FocalLoss(alpha=FOCAL_ALPHA, gamma=FOCAL_GAMMA).to(device)
     best_val_loss = float('inf')
@@ -462,13 +462,28 @@ def evaluate_model(model, test_loader):
         for frames, labels in tqdm(test_loader, desc="Evaluating"):
             frames = frames.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            outputs = model(frames)
+            
+            # Apply TTA only for raw frames (not features)
+            if frames.dim() == 5:  # (B, T, C, H, W)
+                # Standard prediction
+                outputs = model(frames)
+                
+                # Horizontal flip augmentation
+                flipped = torch.flip(frames, dims=[-1])
+                outputs_flip = model(flipped)
+                
+                # Average predictions
+                outputs = (outputs + outputs_flip) / 2.0
+            else:
+                outputs = model(frames)
+            
             outputs = outputs.view(outputs.size(0), 4, 4)
             preds = torch.argmax(outputs, dim=2)
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
     all_preds = torch.cat(all_preds, dim=0).numpy()
     all_labels = torch.cat(all_labels, dim=0).numpy()
+        
     for i, metric in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
         print(f"Classification report for {metric}:")
         print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
@@ -517,7 +532,7 @@ if __name__ == "__main__":
         total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
         model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(lstm_hidden=lstm_hidden, lstm_layers=lstm_layers,
                                                        dropout_rate=dropout_rate, classifier_hidden=256).to(device)
-        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}__bilstm_crossattn_cbam_checkpoint.pth"
+        trial_checkpoint = MODEL_DIR / f"trial_eff_v2l_{trial.number}__bilstm_crossattn_cbam_victory_checkpoint.pth"
         trial_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         loss = progressive_train_model(model, total_epochs, lr, trial_checkpoint, batch_size,
                                        patience=3, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
@@ -526,7 +541,7 @@ if __name__ == "__main__":
         gc.collect()
         return loss
     
-    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam.db"
+    db_path = BASE_DIR / "notebooks" / "tuning_eff_v2l_bilstm_crossattn_cbam_victory.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(db_path)
@@ -537,7 +552,7 @@ if __name__ == "__main__":
     study = optuna.create_study(
         direction="minimize",
         pruner=MedianPruner(n_startup_trials=2, n_warmup_steps=10),
-        study_name="efficientnetv2l_bilstm_crossattn_cbam_study",
+        study_name="efficientnetv2l_bilstm_crossattn_cbam_victory_study",
         storage=f"sqlite:///{db_path}",
         load_if_exists=True
     )
@@ -557,7 +572,7 @@ if __name__ == "__main__":
     # Final Training (using raw images for end-to-end fine-tuning)
     # ------------------------------
     total_epochs = sum(eps for _, eps in PROG_SCHEDULE)
-    final_checkpoint = MODEL_DIR / "final_model_eff_v2l__bilstm_crossattn_cbam_checkpoint.pth"
+    final_checkpoint = MODEL_DIR / "final_model_eff_v2l__bilstm_crossattn_cbam_victory_checkpoint.pth"
     if not final_checkpoint.exists():
         print("\n--- Starting Final Training ---")
         params = best_trial.params
@@ -576,7 +591,7 @@ if __name__ == "__main__":
                         param.requires_grad = True
         final_checkpoint.parent.mkdir(parents=True, exist_ok=True)
         final_loss = progressive_train_model(final_model, total_epochs, lr, final_checkpoint, batch_size,
-                                             patience=5, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
+                                     patience=7, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
     else:
         print("\n--- Skipping Final Training (Checkpoint Exists) ---")
         print(f"Using existing model from: {final_checkpoint}")
