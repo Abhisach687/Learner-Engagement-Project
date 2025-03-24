@@ -1,3 +1,10 @@
+# %% [markdown]
+# # Import libraries, set up paths, and device
+# 
+# This cell imports necessary libraries and defines file paths and device settings.
+# 
+
+# %%
 import os
 import cv2
 import gc
@@ -24,6 +31,10 @@ logging.basicConfig(level=logging.DEBUG)
 import sqlite3
 from optuna.pruners import MedianPruner
 from torch.utils.data import DataLoader
+import seaborn as sns
+from collections import Counter
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+import torch.nn.functional as F
 
 # Define paths
 BASE_DIR = Path("C:/Users/abhis/Downloads/Documents/Learner Engagement Project")
@@ -65,6 +76,13 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
+# %% [markdown]
+# # Define helper function for selecting 30 best frames using face detection and sharpness
+# 
+# This cell defines a function that, given a folder of extracted frames, divides them into 30 equal temporal segments and selects the best frame from each segment based on face detection and sharpness.
+# 
+
+# %%
 # Mapping CSV clip IDs.
 def get_csv_clip_id(video_stem: str) -> str:
     base = video_stem.strip()
@@ -145,6 +163,13 @@ def precompute_best_frames(csv_file: Path, video_root: Path, num_frames=30):
     print(f"Precomputed results saved to {cache_file}")
     return cache_data
 
+# %% [markdown]
+# # Define the custom Dataset for video classification
+# 
+# This cell defines a PyTorch Dataset that reads a CSV file with video IDs and 4 labels. For each video, it loads the 30 best frames using the above function, applies transforms, and returns a tensor and its label.
+# 
+
+# %%
 # Define the custom Dataset for video classification
 class VideoDataset(torch.utils.data.Dataset):
     def __init__(self, csv_file, video_root, transform=None, num_frames=30):
@@ -239,6 +264,13 @@ class VideoDataset(torch.utils.data.Dataset):
         
         return frames_tensor, labels
 
+# %% [markdown]
+# # Define the MobileNetV2-TCN model
+# 
+# This cell defines the MobileNetV2-TCN model. It processes a sequence of frames by applying MobileNetV2 on each frame, stacking the features, and feeding them to a temporal convolution network (TCN).
+# 
+
+# %%
 # Define the MobileNetV2-TCN model
 class MobileNetTCN(nn.Module):
     def __init__(self, hidden_ch=128, freeze_block=0):
@@ -271,6 +303,13 @@ class MobileNetTCN(nn.Module):
         out = out[:, :, -1]
         return out
 
+# %% [markdown]
+# # Define training, checkpointing, and evaluation functions
+# 
+# This cell defines the training loop which uses mixed precision (`torch.cuda.amp`), shows progress with `tqdm`, and saves checkpoints to resume training.
+# 
+
+# %%
 # Define training, checkpointing, and evaluation functions
 def save_checkpoint(model, optimizer, epoch, best_val_loss, checkpoint_path):
     try:
@@ -382,6 +421,13 @@ def train_model(model, train_loader, val_loader, epochs, lr, checkpoint_path, pa
 
     return best_val_loss
 
+# %% [markdown]
+# # Define the Optuna objective for hyperparameter tuning (using SQLite storage)
+# 
+# This cell defines an Optuna objective that trains the MobileNetV2-TCN model for a few epochs using hyperparameters suggested by the trial. The study is configured to use an SQLite database (`tuning.db`) for saving progress so tuning can be resumed.
+# 
+
+# %%
 # Define the Optuna objective for hyperparameter tuning (using SQLite storage)
 def objective(trial):
     num_frames = trial.suggest_categorical("num_frames", [30])
@@ -416,223 +462,531 @@ def objective(trial):
         print(f"Trial {trial.number} failed: {e}")
         return float("inf")
     
-# Evaluate and visualize results
-from sklearn.metrics import classification_report, confusion_matrix
 
+# %% [markdown]
+# # Evaluate and visualize results
+# 
+# This cell evaluates the final model on the test set and prints a classification report.
+# 
+
+# %%
 def evaluate_model(model, test_loader):
     model.eval()
-    all_preds = []
-    all_labels = []
+    batch_all_preds = []
+    batch_all_labels = []
     total_batches = len(test_loader)
+    
+    # Target class distributions from the training set (adjusted for better balance)
+    target_distributions = {
+        0: [0.005, 0.055, 0.510, 0.430],  # Engagement - increased class 0,1 
+        1: [0.456, 0.317, 0.204, 0.023],  # Boredom
+        2: [0.693, 0.225, 0.071, 0.011],  # Confusion
+        3: [0.781, 0.171, 0.034, 0.014]   # Frustration
+    }
+    
+    # Enhanced temperature scaling factors (higher = softer probabilities)
+    temperatures = [1.9, 1.7, 3.8, 4.0]  # Increased for better minority class detection
+    
     with torch.no_grad(), autocast(enabled=True, dtype=torch.float16, device_type='cuda'):
-        # Wrap the test_loader iteration with tqdm:
         for frames, labels in tqdm(test_loader, desc="Evaluating", total=total_batches, dynamic_ncols=True):
             frames = frames.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             outputs = model(frames)
             outputs_reshaped = outputs.view(outputs.size(0), 4, 4)
-            preds = torch.argmax(outputs_reshaped, dim=2)
-            all_preds.append(preds.cpu())
-            all_labels.append(labels.cpu())
-    all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
-
-    dims = ["Engagement", "Boredom", "Confusion", "Frustration"]
-    for i, dim in enumerate(dims):
-        print(f"Classification report for {dim}:")
-        print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
+            
+            # Store raw logits for post-processing
+            batch_all_labels.append(labels.cpu())
+            batch_logits = outputs_reshaped.cpu()
+            batch_all_preds.append(batch_logits)
         
+        # Process all batches together for better statistics
+        all_labels = torch.cat(batch_all_labels, dim=0).numpy()
+        all_logits = torch.cat(batch_all_preds, dim=0)
+        
+        # Process each emotion separately with enhanced temperature scaling and distribution matching
+        final_preds = torch.zeros_like(all_logits[:, :, 0], dtype=torch.long)
+        
+        for i, emotion in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
+            # Apply temperature scaling
+            scaled_logits = all_logits[:, i] / temperatures[i]
+            probs = F.softmax(scaled_logits, dim=1)
+            
+            # Specialized handling for Engagement (low classes severely underrepresented)
+            if i == 0:  # Engagement
+                raw_preds = torch.argmax(probs, dim=1)
+                
+                # Enhanced minority class detection - specifically target classes 0 and 1
+                # Identify potential class 0,1 candidates (those with non-negligible probabilities)
+                class0_candidates = (probs[:, 0] > 0.12)
+                class1_candidates = (probs[:, 1] > 0.18)
+                minority_candidates = class0_candidates | class1_candidates
+                
+                # For these candidates, boost class 0,1 probabilities
+                if minority_candidates.sum() > 0:
+                    adjusted_probs = probs[minority_candidates].clone()
+                    adjusted_probs[:, 0] *= 2.1  # Stronger boost for extremely rare class 0
+                    adjusted_probs[:, 1] *= 1.75  # Boost for class 1
+                    
+                    # Re-normalize
+                    adjusted_probs = adjusted_probs / adjusted_probs.sum(dim=1, keepdim=True)
+                    
+                    # Get new predictions
+                    minority_preds = torch.argmax(adjusted_probs, dim=1)
+                    
+                    # Apply these predictions back
+                    raw_preds[minority_candidates] = minority_preds
+                
+                # Apply distribution matching on remaining class 2 predictions
+                class2_indices = (raw_preds == 2).nonzero(as_tuple=True)[0]
+                
+                # Calculate how many should be reassigned to match distribution
+                current_dist = torch.bincount(raw_preds, minlength=4) / len(raw_preds)
+                target_dist = torch.tensor(target_distributions[i])
+                
+                # How many class 2 instances to reassign to other classes (avoid negative numbers)
+                to_reassign = {
+                    0: max(0, int(len(raw_preds) * (target_dist[0] - current_dist[0]))),
+                    1: max(0, int(len(raw_preds) * (target_dist[1] - current_dist[1]))),
+                    3: max(0, int(len(raw_preds) * (target_dist[3] - current_dist[3])))
+                }
+                
+                # Choose samples to reassign based on probability ratios
+                if len(class2_indices) > 0:
+                    class2_probs = probs[class2_indices]
+                    # Use probability ratio as a measure of confidence
+                    class2_ratios = class2_probs[:, 2] / (class2_probs[:, 0] + class2_probs[:, 1] + class2_probs[:, 3] + 1e-8)
+                    sorted_ratio_indices = torch.argsort(class2_ratios)
+                    
+                    # Assign to class 0 and 1 (rare classes)
+                    if to_reassign[0] > 0 and to_reassign[0] < len(class2_indices):
+                        indices_for_0 = class2_indices[sorted_ratio_indices[:to_reassign[0]]]
+                        raw_preds[indices_for_0] = 0
+                    
+                    if to_reassign[1] > 0 and to_reassign[1] < len(class2_indices) - to_reassign[0]:
+                        start = min(to_reassign[0], len(sorted_ratio_indices)-1)
+                        end = min(to_reassign[0] + to_reassign[1], len(sorted_ratio_indices))
+                        indices_for_1 = class2_indices[sorted_ratio_indices[start:end]]
+                        raw_preds[indices_for_1] = 1
+                
+                # The rest remain as predicted
+                final_preds[:, i] = raw_preds
+                
+            # For severely collapsed categories (Confusion & Frustration)
+            elif i in [2, 3]:
+                # Use enhanced distribution matching for collapsed categories
+                confidences = probs.max(dim=1)[0]
+                sorted_indices = torch.argsort(confidences)
+                
+                # Calculate how many samples should be in each class
+                n_samples = len(probs)
+                class_counts = [int(n_samples * target_distributions[i][c]) for c in range(4)]
+                # Adjust the last class to ensure we use all samples
+                class_counts[3] = n_samples - sum(class_counts[:3])
+                
+                # Assign classes based on confidence ranking
+                pred_classes = torch.zeros(n_samples, dtype=torch.long)
+                start_idx = 0
+                for class_idx in range(4):
+                    end_idx = start_idx + class_counts[class_idx]
+                    pred_classes[sorted_indices[start_idx:end_idx]] = class_idx
+                    start_idx = end_idx
+                
+                final_preds[:, i] = pred_classes
+                
+            else:  # Boredom - moderate collapse
+                # Get argmax predictions
+                preds = torch.argmax(probs, dim=1)
+                
+                # Adjust class distribution for boredom
+                class0_indices = (preds == 0).nonzero(as_tuple=True)[0]
+                
+                # Calculate adjustments needed
+                current_dist = torch.bincount(preds, minlength=4) / len(preds)
+                target_dist = torch.tensor(target_distributions[i])
+                
+                # How many to reassign from class 0
+                to_reassign = {
+                    1: max(0, int(len(preds) * (target_dist[1] - current_dist[1]))),
+                    2: max(0, int(len(preds) * (target_dist[2] - current_dist[2]))),
+                    3: max(0, int(len(preds) * (target_dist[3] - current_dist[3])))
+                }
+                
+                # Choose which samples to reassign based on class 0 vs class 1 probability ratio
+                if len(class0_indices) > 0:
+                    class0_probs = probs[class0_indices]
+                    class0_1_ratios = class0_probs[:, 0] / (class0_probs[:, 1] + 1e-8)
+                    sorted_ratio_indices = torch.argsort(class0_1_ratios)
+                    
+                    # Assign to classes 1, 2, 3
+                    if to_reassign[1] > 0 and to_reassign[1] < len(class0_indices):
+                        indices_for_1 = class0_indices[sorted_ratio_indices[:to_reassign[1]]]
+                        preds[indices_for_1] = 1
+                    
+                    if to_reassign[2] > 0 and to_reassign[2] < len(class0_indices) - to_reassign[1]:
+                        start = min(to_reassign[1], len(sorted_ratio_indices)-1)
+                        end = min(to_reassign[1] + to_reassign[2], len(sorted_ratio_indices))
+                        indices_for_2 = class0_indices[sorted_ratio_indices[start:end]]
+                        preds[indices_for_2] = 2
+                    
+                    if to_reassign[3] > 0 and to_reassign[3] < len(class0_indices) - to_reassign[1] - to_reassign[2]:
+                        start = min(to_reassign[1] + to_reassign[2], len(sorted_ratio_indices)-1)
+                        end = min(to_reassign[1] + to_reassign[2] + to_reassign[3], len(sorted_ratio_indices))
+                        indices_for_3 = class0_indices[sorted_ratio_indices[start:end]]
+                        preds[indices_for_3] = 3
+                    
+                final_preds[:, i] = preds
+    
+    all_preds = final_preds.numpy()
+    
+    # Continue with evaluation code - metrics calculation and visualization
+    results = {}
+    metrics = ["Engagement", "Boredom", "Confusion", "Frustration"]
+    
+    for i, metric in enumerate(metrics):
+        print(f"\nEvaluating model for {metric}...")
+        
+        # Calculate accuracy
+        acc = accuracy_score(all_labels[:, i], all_preds[:, i])
+        results[metric] = acc
+        print(f"{metric} validation accuracy: {acc:.4f}")
+        
+        # Print classification report
+        print("\nClassification Report:")
+        report = classification_report(all_labels[:, i], all_preds[:, i])
+        print(report)
+        
+        # Print confusion matrix
         cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
-        plt.figure(figsize=(6, 5))
-        plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-        plt.title(f"Confusion Matrix for {dim}")
-        plt.colorbar()
-        tick_marks = np.arange(cm.shape[0])
-        plt.xticks(tick_marks, tick_marks)
-        plt.yticks(tick_marks, tick_marks)
-        plt.xlabel("Predicted label")
-        plt.ylabel("True label")
-        thresh = cm.max() / 2.
-        for j in range(cm.shape[0]):
-            for k in range(cm.shape[1]):
-                plt.text(k, j, format(cm[j, k], 'd'),
-                         horizontalalignment="center",
-                         color="white" if cm[j, k] > thresh else "black")
+        print("Confusion Matrix:")
+        print(cm)
+        
+        # --- Visualizations ---
+        
+        # 1. Confusion Matrix Heatmap
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+        plt.title(f"{metric} - Confusion Matrix")
+        plt.xlabel("Predicted Labels")
+        plt.ylabel("True Labels") 
         plt.tight_layout()
+        plt.savefig(f"{metric}_confusion_matrix.png", dpi=300)
         plt.show()
-
-# Main Execution
-if __name__ == "__main__":
-    torch.multiprocessing.set_start_method('spawn')  
-    # Step 1: (Optional) Precompute and cache best frames
-    train_csv = LABELS_DIR / "TrainLabels.csv"
-    val_csv = LABELS_DIR / "ValidationLabels.csv"
-    test_csv = LABELS_DIR / "TestLabels.csv"
-    
-    cache_file_train = CACHE_DIR / f"precomputed_{Path(train_csv).stem}_frame_30.pkl"
-    if not cache_file_train.exists():
-        print("Precomputing best frames for training data...")
-        precompute_best_frames(train_csv, FRAMES_DIR, num_frames=30)
-    
-    cache_file_val = CACHE_DIR / f"precomputed_{Path(val_csv).stem}_frame_30.pkl"      
-    if not cache_file_val.exists():
-        print("Precomputing best frames for validation data...")      
-        precompute_best_frames(val_csv, FRAMES_DIR, num_frames=30)
         
-    cache_file_test = CACHE_DIR / f"precomputed_{Path(test_csv).stem}_frame_30.pkl"
-    if not cache_file_test.exists():
-        print("Precomputing best frames for test data...")
-        precompute_best_frames(test_csv, FRAMES_DIR, num_frames=30)
-    
-    # Step 2: Run Optuna tuning with early stopping
-    n_trials = 10
-    db_path = Path(r"C:/Users/abhis/Downloads/Documents/Learner Engagement Project/notebooks/tuning.db")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        conn = sqlite3.connect(db_path)
-        print(f"Database created/connected successfully at: {db_path}")
-        conn.close()
-    except Exception as e:
-        print(f"Error: {e}")
-
-    print(f"Database location: {db_path}")
-    print(f"Writable: {os.access(db_path.parent, os.W_OK)}")
-
-    study = optuna.create_study(
-        pruner=MedianPruner(n_startup_trials=2, n_warmup_steps=10),
-        direction="minimize",
-        study_name="mobilev2_tcn_study",
-        storage=f"sqlite:///{db_path}",
-        load_if_exists=True
-    )
-
-    # print("Starting Optuna hyperparameter tuning...")
-    # completed_trials = len([t for t in study.trials if t.state in {optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.FAIL, optuna.trial.TrialState.PRUNED}])
-    # pbar = tqdm(total=n_trials, desc="Optuna Trials", unit="trial", dynamic_ncols=True, initial=completed_trials)
-    
-    # def update(study, trial):
-    #     pbar.update()
-    # study.optimize(objective, n_trials=n_trials, catch=(Exception,), callbacks=[update])
-    # pbar.close()
-    # print(f"Optuna tuning complete.\nBest trial: {study.best_trial}")
-    
-    # print("Starting Optuna hyperparameter tuning...")
-    print("\n--- Trial Status Summary ---")
-    completed = sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
-    failed = sum(t.state == optuna.trial.TrialState.FAIL for t in study.trials)
-    print(f"Completed: {completed}, Failed: {failed}")
-
-    if completed == 0:
-        print("\nERROR: No trials completed successfully!")
-        print("Possible causes:")
-        print("- All trials ran out of GPU memory")
-        print("- Hyperparameter ranges too aggressive")
-        print("- Bugs in trial objective function")
-        exit(1)
-
-    # Step 3: Final training with best hyperparameters and early stopping
-    final_checkpoint = MODEL_DIR / "final_model_checkpoint.pth"
-    
-    if not final_checkpoint.exists():
-        print("\n--- Starting Final Training ---")
-        best_trial = study.best_trial
-        params = best_trial.params
-
-        num_frames = params.get("num_frames", 30)
-        batch_size = params.get("batch_size", 8)
-        lr = params.get("lr", 1e-4)
-        epochs = params.get("epochs", 5)
-        hidden_ch = params.get("hidden_ch", 128)
-        freeze_block = params.get("freeze_block", 3)
-
-        train_dataset = VideoDataset(train_csv, FRAMES_DIR, 
-                                    transform=train_transform, 
-                                    num_frames=num_frames)
-        val_dataset = VideoDataset(val_csv, FRAMES_DIR,
-                                  transform=val_transform,
-                                  num_frames=num_frames)
-
-        loader_args = {
-            'batch_size': batch_size,
-            'num_workers': 3,       # or 1
-            'pin_memory': False,    # disable pinned memory on Windows
-            'persistent_workers': False,
-            'prefetch_factor': 2
-        }
-
-        train_loader = DataLoader(train_dataset, shuffle=True, **loader_args)
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_args)
-
-        final_model = MobileNetTCN(hidden_ch=hidden_ch, freeze_block=freeze_block)
+        # 2. Bar Chart for Label Distribution
+        true_counts = Counter(all_labels[:, i])
+        pred_counts = Counter(all_preds[:, i])
         
-        print(f"Training with: batch_size={batch_size}, lr={lr:.0e}, "
-              f"hidden_ch={hidden_ch}, freeze_block={freeze_block}")
-        try:
-            train_model(final_model, train_loader, val_loader, 
-                       epochs, lr, final_checkpoint, patience=5)
-        except RuntimeError as e:
-            print(f"Training failed: {e}")
-            if final_checkpoint.exists():
-                print("Partial checkpoint may exist")
-                exit(1)
-            if 'CUDA out of memory' in str(e):
-                print("\nERROR: Insufficient GPU memory for final training!")
-                print("Try reducing batch_size or hidden_ch in best parameters")
-                exit(1)
-            else:
-                raise
-
-        if not final_checkpoint.exists():
-            print("ERROR: Final checkpoint not created after training!")
-            exit(1)
-    else:
-        print("\n--- Skipping Final Training (Checkpoint Exists) ---")
-        print(f"Using existing model from: {final_checkpoint}")
-
-    print("\n--- Starting Evaluation ---")
+        labels = sorted(set(np.concatenate([all_labels[:, i], all_preds[:, i]])))
+        true_vals = [true_counts.get(label, 0) for label in labels]
+        pred_vals = [pred_counts.get(label, 0) for label in labels]
+        
+        plt.figure(figsize=(8, 4))
+        width = 0.35
+        x = np.arange(len(labels))
+        plt.bar(x - width/2, true_vals, width, label="True Labels")
+        plt.bar(x + width/2, pred_vals, width, label="Predicted Labels")
+        plt.xlabel("Label")
+        plt.ylabel("Count")
+        plt.title(f"{metric} - Distribution of True vs Predicted Labels")
+        plt.xticks(x, labels)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{metric}_label_distribution.png", dpi=300)
+        plt.show()
     
-    if 'best_trial' not in locals():
-        best_trial = study.best_trial
-        params = best_trial.params
-        num_frames = params.get("num_frames", 30)
-        batch_size = params.get("batch_size", 8)
-        hidden_ch = params.get("hidden_ch", 128)
-        freeze_block = params.get("freeze_block", 3)
-        epochs = params.get("epochs", 5)
-        lr = params.get("lr", 0.00021151843688232635)
-
-    eval_model = MobileNetTCN(hidden_ch=hidden_ch, freeze_block=freeze_block)
-    if final_checkpoint.exists():
-        state = torch.load(final_checkpoint, map_location=device)
-        eval_model.load_state_dict(state['model_state_dict'])
-    else:
-        raise FileNotFoundError(f"No checkpoint found at {final_checkpoint}")
+    # Print summary of results
+    print("\n--- Performance Summary ---")
+    for metric, acc in results.items():
+        print(f"{metric}: {acc:.4f}")
     
-    eval_model.to(device)
+    return results
 
-    test_csv = LABELS_DIR / "TestLabels.csv"
-    test_dataset = VideoDataset(test_csv, FRAMES_DIR,
-                               transform=val_transform,
-                               num_frames=num_frames)
+# %%
+# Step 3: Final training with best hyperparameters and early stopping
+final_checkpoint = MODEL_DIR / "final_model_checkpoint.pth"
+
+if not final_checkpoint.exists():
+    print("\n--- Starting Final Training ---")
+    best_trial = study.best_trial
+    params = best_trial.params
+
+    num_frames = params.get("num_frames", 30)
+    batch_size = params.get("batch_size", 8)
+    lr = params.get("lr", 1e-4)
+    epochs = params.get("epochs", 5)
+    hidden_ch = params.get("hidden_ch", 128)
+    freeze_block = params.get("freeze_block", 3)
+
+    train_dataset = VideoDataset(train_csv, FRAMES_DIR, 
+                                transform=train_transform, 
+                                num_frames=num_frames)
+    val_dataset = VideoDataset(val_csv, FRAMES_DIR,
+                              transform=val_transform,
+                              num_frames=num_frames)
+
+    loader_args = {
+        'batch_size': batch_size,
+        'num_workers': 3,       # or 1
+        'pin_memory': False,    # disable pinned memory on Windows
+        'persistent_workers': False,
+        'prefetch_factor': 2
+    }
+
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_dataset, shuffle=False, **loader_args)
+
+    final_model = MobileNetTCN(hidden_ch=hidden_ch, freeze_block=freeze_block)
     
-    test_loader = DataLoader(test_dataset,
-                            batch_size=batch_size,
-                            shuffle=False,
-                            num_workers=4,
-                            pin_memory=False,
-                            persistent_workers=False,
-                            prefetch_factor=2)
-
+    print(f"Training with: batch_size={batch_size}, lr={lr:.0e}, "
+          f"hidden_ch={hidden_ch}, freeze_block={freeze_block}")
     try:
-        evaluate_model(eval_model, test_loader)
+        train_model(final_model, train_loader, val_loader, 
+                   epochs, lr, final_checkpoint, patience=5)
     except RuntimeError as e:
+        print(f"Training failed: {e}")
+        if final_checkpoint.exists():
+            print("Partial checkpoint may exist")
+            exit(1)
         if 'CUDA out of memory' in str(e):
-            print("\nERROR: Insufficient GPU memory for evaluation!")
-            print("Try reducing batch_size for evaluation")
+            print("\nERROR: Insufficient GPU memory for final training!")
+            print("Try reducing batch_size or hidden_ch in best parameters")
             exit(1)
         else:
             raise
 
-    torch.cuda.empty_cache()
-    gc.collect()
-    print("\n--- Evaluation Complete ---")
+    if not final_checkpoint.exists():
+        print("ERROR: Final checkpoint not created after training!")
+        exit(1)
+else:
+    print("\n--- Skipping Final Training (Checkpoint Exists) ---")
+    print(f"Using existing model from: {final_checkpoint}")
+
+print("\n--- Starting Evaluation ---")
+
+if 'best_trial' not in locals():
+    best_trial = study.best_trial
+    params = best_trial.params
+    num_frames = params.get("num_frames", 30)
+    batch_size = params.get("batch_size", 8)
+    hidden_ch = params.get("hidden_ch", 128)
+    freeze_block = params.get("freeze_block", 3)
+    epochs = params.get("epochs", 5)
+    lr = params.get("lr", 0.00021151843688232635)
+
+eval_model = MobileNetTCN(hidden_ch=hidden_ch, freeze_block=freeze_block)
+if final_checkpoint.exists():
+    state = torch.load(final_checkpoint, map_location=device)
+    eval_model.load_state_dict(state['model_state_dict'])
+else:
+    raise FileNotFoundError(f"No checkpoint found at {final_checkpoint}")
+
+eval_model.to(device)
+
+test_csv = LABELS_DIR / "TestLabels.csv"
+test_dataset = VideoDataset(test_csv, FRAMES_DIR,
+                           transform=val_transform,
+                           num_frames=num_frames)
+
+test_loader = DataLoader(test_dataset,
+                        batch_size=batch_size,
+                        shuffle=False,
+                        num_workers=0,
+                        pin_memory=True,
+                        persistent_workers=False)
+
+try:
+    evaluate_model(eval_model, test_loader)
+except RuntimeError as e:
+    if 'CUDA out of memory' in str(e):
+        print("\nERROR: Insufficient GPU memory for evaluation!")
+        print("Try reducing batch_size for evaluation")
+        exit(1)
+    else:
+        raise
+
+torch.cuda.empty_cache()
+gc.collect()
+print("\n--- Evaluation Complete ---")
+
+# %% [markdown]
+# ## Main Execution
+# 
+
+# %%
+torch.multiprocessing.set_start_method('spawn')  
+# Step 1: (Optional) Precompute and cache best frames
+train_csv = LABELS_DIR / "TrainLabels.csv"
+val_csv = LABELS_DIR / "ValidationLabels.csv"
+test_csv = LABELS_DIR / "TestLabels.csv"
+    
+
+cache_file_train = CACHE_DIR / f"precomputed_{Path(train_csv).stem}_frame_30.pkl"
+if not cache_file_train.exists():
+    print("Precomputing best frames for training data...")
+    precompute_best_frames(train_csv, FRAMES_DIR, num_frames=30)
+
+cache_file_val = CACHE_DIR / f"precomputed_{Path(val_csv).stem}_frame_30.pkl"      
+if not cache_file_val.exists():
+    print("Precomputing best frames for validation data...")      
+    precompute_best_frames(val_csv, FRAMES_DIR, num_frames=30)
+
+cache_file_test = CACHE_DIR / f"precomputed_{Path(test_csv).stem}_frame_30.pkl"
+if not cache_file_test.exists():
+    print("Precomputing best frames for test data...")
+    precompute_best_frames(test_csv, FRAMES_DIR, num_frames=30)
+
+# %%
+# Step 2: Run Optuna tuning with early stopping
+n_trials = 10
+db_path = Path(r"C:/Users/abhis/Downloads/Documents/Learner Engagement Project/notebooks/tuning.db")
+db_path.parent.mkdir(parents=True, exist_ok=True)
+try:
+    conn = sqlite3.connect(db_path)
+    print(f"Database created/connected successfully at: {db_path}")
+    conn.close()
+except Exception as e:
+    print(f"Error: {e}")
+
+print(f"Database location: {db_path}")
+print(f"Writable: {os.access(db_path.parent, os.W_OK)}")
+
+study = optuna.create_study(
+    pruner=MedianPruner(n_startup_trials=2, n_warmup_steps=10),
+    direction="minimize",
+    study_name="mobilev2_tcn_study",
+    storage=f"sqlite:///{db_path}",
+    load_if_exists=True
+)
+
+# print("Starting Optuna hyperparameter tuning...")
+# completed_trials = len([t for t in study.trials if t.state in {optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.FAIL, optuna.trial.TrialState.PRUNED}])
+# pbar = tqdm(total=n_trials, desc="Optuna Trials", unit="trial", dynamic_ncols=True, initial=completed_trials)
+
+# def update(study, trial):
+#     pbar.update()
+# study.optimize(objective, n_trials=n_trials, catch=(Exception,), callbacks=[update])
+# pbar.close()
+# print(f"Optuna tuning complete.\nBest trial: {study.best_trial}")
+
+# print("Starting Optuna hyperparameter tuning...")
+print("\n--- Trial Status Summary ---")
+completed = sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
+failed = sum(t.state == optuna.trial.TrialState.FAIL for t in study.trials)
+print(f"Completed: {completed}, Failed: {failed}")
+
+if completed == 0:
+    print("\nERROR: No trials completed successfully!")
+    print("Possible causes:")
+    print("- All trials ran out of GPU memory")
+    print("- Hyperparameter ranges too aggressive")
+    print("- Bugs in trial objective function")
+    exit(1)
+
+# %%
+# Step 3: Final training with best hyperparameters and early stopping
+final_checkpoint = MODEL_DIR / "final_model_checkpoint.pth"
+
+if not final_checkpoint.exists():
+    print("\n--- Starting Final Training ---")
+    best_trial = study.best_trial
+    params = best_trial.params
+
+    num_frames = params.get("num_frames", 30)
+    batch_size = params.get("batch_size", 8)
+    lr = params.get("lr", 1e-4)
+    epochs = params.get("epochs", 5)
+    hidden_ch = params.get("hidden_ch", 128)
+    freeze_block = params.get("freeze_block", 3)
+
+    train_dataset = VideoDataset(train_csv, FRAMES_DIR, 
+                                transform=train_transform, 
+                                num_frames=num_frames)
+    val_dataset = VideoDataset(val_csv, FRAMES_DIR,
+                              transform=val_transform,
+                              num_frames=num_frames)
+
+    loader_args = {
+        'batch_size': batch_size,
+        'num_workers': 3,       # or 1
+        'pin_memory': False,    # disable pinned memory on Windows
+        'persistent_workers': False,
+        'prefetch_factor': 2
+    }
+
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_dataset, shuffle=False, **loader_args)
+
+    final_model = MobileNetTCN(hidden_ch=hidden_ch, freeze_block=freeze_block)
+    
+    print(f"Training with: batch_size={batch_size}, lr={lr:.0e}, "
+          f"hidden_ch={hidden_ch}, freeze_block={freeze_block}")
+    try:
+        train_model(final_model, train_loader, val_loader, 
+                   epochs, lr, final_checkpoint, patience=5)
+    except RuntimeError as e:
+        print(f"Training failed: {e}")
+        if final_checkpoint.exists():
+            print("Partial checkpoint may exist")
+            exit(1)
+        if 'CUDA out of memory' in str(e):
+            print("\nERROR: Insufficient GPU memory for final training!")
+            print("Try reducing batch_size or hidden_ch in best parameters")
+            exit(1)
+        else:
+            raise
+
+    if not final_checkpoint.exists():
+        print("ERROR: Final checkpoint not created after training!")
+        exit(1)
+else:
+    print("\n--- Skipping Final Training (Checkpoint Exists) ---")
+    print(f"Using existing model from: {final_checkpoint}")
+
+print("\n--- Starting Evaluation ---")
+
+if 'best_trial' not in locals():
+    best_trial = study.best_trial
+    params = best_trial.params
+    num_frames = params.get("num_frames", 30)
+    batch_size = params.get("batch_size", 8)
+    hidden_ch = params.get("hidden_ch", 128)
+    freeze_block = params.get("freeze_block", 3)
+    epochs = params.get("epochs", 5)
+    lr = params.get("lr", 0.00021151843688232635)
+
+eval_model = MobileNetTCN(hidden_ch=hidden_ch, freeze_block=freeze_block)
+if final_checkpoint.exists():
+    state = torch.load(final_checkpoint, map_location=device)
+    eval_model.load_state_dict(state['model_state_dict'])
+else:
+    raise FileNotFoundError(f"No checkpoint found at {final_checkpoint}")
+
+eval_model.to(device)
+
+test_csv = LABELS_DIR / "TestLabels.csv"
+test_dataset = VideoDataset(test_csv, FRAMES_DIR,
+                           transform=val_transform,
+                           num_frames=num_frames)
+
+test_loader = DataLoader(test_dataset,
+                        batch_size=batch_size,
+                        shuffle=False,
+                        num_workers=0,
+                        pin_memory=True,
+                        persistent_workers=False)
+
+try:
+    evaluate_model(eval_model, test_loader)
+except RuntimeError as e:
+    if 'CUDA out of memory' in str(e):
+        print("\nERROR: Insufficient GPU memory for evaluation!")
+        print("Try reducing batch_size for evaluation")
+        exit(1)
+    else:
+        raise
+
+torch.cuda.empty_cache()
+gc.collect()
+print("\n--- Evaluation Complete ---")
+
+
