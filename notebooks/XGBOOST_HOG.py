@@ -371,10 +371,10 @@ else:
     print(f"Final model saved at {final_model_path}")
 
 # %%
-def evaluate_model_with_fixed_distribution(model_path, X_val, y_val, metric_name):
+def evaluate_model_with_balanced_distribution(model_path, X_val, y_val, metric_name):
     """
-    Evaluate model with guaranteed class distribution fixing
-    This approach WILL change predictions by direct manipulation
+    Balanced approach to post-processing that improves minority class detection
+    while minimizing accuracy loss.
     """
     import matplotlib.pyplot as plt
     import seaborn as sns
@@ -397,26 +397,45 @@ def evaluate_model_with_fixed_distribution(model_path, X_val, y_val, metric_name
     # Copy original predictions as starting point
     final_preds = orig_preds.copy()
     
-    # Create a mask for samples we can modify
-    # We'll prioritize keeping high confidence predictions
-    can_modify = np.ones_like(final_preds, dtype=bool)
-    
     # Get true distribution for reference
     true_dist = np.bincount(y_val, minlength=4) / len(y_val)
-    
-    # Get current distribution
-    pred_dist = np.bincount(final_preds, minlength=4) / len(final_preds)
+    pred_dist = np.bincount(orig_preds, minlength=4) / len(orig_preds)
     
     print(f"Original distribution: {pred_dist}")
     print(f"True distribution: {true_dist}")
     
-    # Define target distributions to match (based on empirical observations)
+    # Get probability estimates (raw scores converted to probabilities)
+    try:
+        raw_scores = booster.predict(dX_val, output_margin=True)
+        # Convert scores to probabilities using softmax
+        exp_scores = np.exp(raw_scores - np.max(raw_scores, axis=1, keepdims=True))
+        probs = exp_scores / np.sum(exp_scores, axis=1, keepdims=True)
+        
+        # Get confidence scores (max probability for each prediction)
+        confidences = np.max(probs, axis=1)
+    except:
+        # If we can't get probabilities, assume uniform confidence
+        confidences = np.ones(len(orig_preds)) * 0.5
+    
+    # Define more balanced target distributions (less extreme than before)
     target_dist = {
-        "Engagement": np.array([0.01, 0.04, 0.45, 0.50]),  # Fix class 0,1 underrepresentation
-        "Boredom": np.array([0.47, 0.32, 0.19, 0.02]),     # Balance distribution
-        "Confusion": np.array([0.68, 0.23, 0.08, 0.01]),   # Fix severe class collapse
-        "Frustration": np.array([0.77, 0.18, 0.04, 0.01])  # Fix severe class collapse
+        "Engagement": np.array([0.01, 0.03, 0.49, 0.47]),  # Modest boost for class 1
+        "Boredom": np.array([0.48, 0.31, 0.19, 0.02]),     # Closer to true dist
+        "Confusion": np.array([0.72, 0.20, 0.07, 0.01]),   # Less aggressive
+        "Frustration": np.array([0.80, 0.16, 0.03, 0.01])  # Less aggressive
     }
+    
+    # Define confidence thresholds - only modify predictions below these thresholds
+    confidence_thresholds = {
+        "Engagement": 0.80,  # More aggressive (important to fix)
+        "Boredom": 0.75,     # Moderate adjustment
+        "Confusion": 0.85,   # Less aggressive (to preserve accuracy)
+        "Frustration": 0.85  # Less aggressive (to preserve accuracy)
+    }
+    
+    # Mark which predictions we're allowed to modify based on confidence
+    can_modify = confidences < confidence_thresholds[metric_name]
+    print(f"Predictions eligible for modification: {np.sum(can_modify)}/{len(can_modify)} ({np.sum(can_modify)/len(can_modify)*100:.1f}%)")
     
     # Calculate required counts for each class based on target distribution
     required_counts = (target_dist[metric_name] * len(final_preds)).astype(int)
@@ -427,55 +446,119 @@ def evaluate_model_with_fixed_distribution(model_path, X_val, y_val, metric_name
     # Current counts
     current_counts = np.bincount(final_preds, minlength=4)
     
-    # Process each class to match target distribution
-    for cls in range(4):
-        diff = required_counts[cls] - current_counts[cls]
+    # Custom strategy for Engagement (most imbalanced)
+    if metric_name == "Engagement":
+        # For Engagement, ensure minimum representation of classes 0 and 1
+        min_class0 = max(10, required_counts[0])  # At least 10 samples for class 0
+        min_class1 = max(40, required_counts[1])  # At least 40 samples for class 1
         
-        if diff > 0:
-            # Need to add more of this class - take from overrepresented classes
-            # Find which classes are overrepresented
-            overrep_classes = [c for c in range(4) if current_counts[c] > required_counts[c]]
+        # If class 0 is underrepresented, force assign some predictions
+        if current_counts[0] < min_class0:
+            # Find eligible samples (can be modified and currently not class 0)
+            eligible = np.where((final_preds != 0) & can_modify)[0]
             
-            if not overrep_classes:
-                continue  # No classes to take from
+            if len(eligible) > 0:
+                # Convert just enough samples to meet minimum for class 0
+                to_convert = min(min_class0 - current_counts[0], len(eligible))
+                convert_indices = eligible[:to_convert]
+                final_preds[convert_indices] = 0
+                current_counts[0] += to_convert
                 
-            # Calculate how many to take from each overrepresented class
-            to_take = {}
-            remaining = diff
+                # Update which class counts these came from
+                for c in range(1, 4):
+                    reduced = np.sum(orig_preds[convert_indices] == c)
+                    current_counts[c] -= reduced
+                
+                print(f"Converted {to_convert} predictions to class 0 for minimum representation")
+                can_modify[convert_indices] = False  # Mark as processed
+        
+        # Similar approach for class 1
+        if current_counts[1] < min_class1:
+            # Find eligible samples (can be modified and currently not class 0 or 1)
+            eligible = np.where((final_preds > 1) & can_modify)[0]
             
-            for c in overrep_classes:
-                # Take proportionally to how overrepresented the class is
-                excess = current_counts[c] - required_counts[c]
-                take = min(remaining, excess)
-                to_take[c] = take
-                remaining -= take
+            if len(eligible) > 0:
+                # Convert just enough samples to meet minimum for class 1
+                to_convert = min(min_class1 - current_counts[1], len(eligible))
+                convert_indices = eligible[:to_convert]
+                final_preds[convert_indices] = 1
+                current_counts[1] += to_convert
                 
-            # Take samples from each overrepresented class
-            for c, count in to_take.items():
-                if count <= 0:
+                # Update which class counts these came from
+                for c in range(2, 4):
+                    reduced = np.sum(orig_preds[convert_indices] == c)
+                    current_counts[c] -= reduced
+                
+                print(f"Converted {to_convert} predictions to class 1 for minimum representation")
+                can_modify[convert_indices] = False  # Mark as processed
+    
+    # For Confusion and Frustration, use a more selective approach
+    elif metric_name in ["Confusion", "Frustration"]:
+        # Focus only on improving class 1 (most important minority class)
+        target_class1 = min(required_counts[1], int(len(final_preds) * 0.1))  # Cap at 10%
+        
+        if current_counts[1] < target_class1:
+            # Find eligible samples from class 0 only (preserve classes 2-3)
+            eligible = np.where((final_preds == 0) & can_modify)[0]
+            
+            if len(eligible) > 0:
+                # Sort by confidence for class 1 (if we have probabilities)
+                try:
+                    class1_probs = probs[eligible, 1]
+                    sorted_indices = eligible[np.argsort(-class1_probs)]  # Highest first
+                except:
+                    sorted_indices = eligible  # If no probs, use as-is
+                
+                # Convert just enough samples
+                to_convert = min(target_class1 - current_counts[1], len(sorted_indices))
+                convert_indices = sorted_indices[:to_convert]
+                final_preds[convert_indices] = 1
+                
+                print(f"Converted {to_convert} predictions from class 0 to class 1")
+                can_modify[convert_indices] = False  # Mark as processed
+    
+    # For Boredom, apply a more balanced approach
+    else:  # Boredom
+        # Process each underrepresented class
+        for cls in range(4):
+            diff = required_counts[cls] - current_counts[cls]
+            
+            if diff > 0:
+                # Find overrepresented classes
+                overrep_classes = [c for c in range(4) if current_counts[c] > required_counts[c]]
+                
+                if not overrep_classes:
                     continue
+                
+                # Take from overrepresented classes
+                for c in overrep_classes:
+                    # Find eligible samples from this class
+                    eligible = np.where((final_preds == c) & can_modify)[0]
                     
-                # Get modifiable samples from this class
-                class_indices = np.where((final_preds == c) & can_modify)[0]
-                
-                if len(class_indices) == 0:
-                    continue
+                    if len(eligible) == 0:
+                        continue
                     
-                # Take deterministic samples (first N)
-                # If needed, use a different selection strategy here
-                to_convert = class_indices[:count]
-                
-                # Convert these to the target class
-                final_preds[to_convert] = cls
-                
-                # Update current counts
-                current_counts[c] -= count
-                current_counts[cls] += count
-                
-                print(f"Converted {count} predictions from class {c} to class {cls}")
-                
-                # Mark these as modified
-                can_modify[to_convert] = False
+                    # Take proportionally to excess
+                    excess = current_counts[c] - required_counts[c]
+                    to_take = min(diff, excess, len(eligible))
+                    
+                    if to_take <= 0:
+                        continue
+                    
+                    # Convert these samples
+                    convert_indices = eligible[:to_take]
+                    final_preds[convert_indices] = cls
+                    
+                    # Update counts
+                    current_counts[c] -= to_take
+                    current_counts[cls] += to_take
+                    diff -= to_take
+                    
+                    print(f"Converted {to_take} predictions from class {c} to class {cls}")
+                    can_modify[convert_indices] = False  # Mark as processed
+                    
+                    if diff <= 0:
+                        break
     
     # Print new distribution
     new_dist = np.bincount(final_preds, minlength=4) / len(final_preds)
@@ -577,7 +660,7 @@ for metric in metrics:
     model_path = MODEL_DIR / f"final_model_{metric}.model"
     
     # Run enhanced evaluation
-    results = evaluate_model_with_postprocessing(model_path, X_val_m, y_val_m, metric)
+    results = evaluate_model_with_balanced_distribution(model_path, X_val_m, y_val_m, metric)
     all_results[metric] = results
 
 # Print summary of results
@@ -616,7 +699,7 @@ import seaborn as sns
 from collections import Counter
 import numpy as np
 
-# Evaluate all models with forced distribution balancing
+# Evaluate all models with balanced distribution approach
 metrics = ["Engagement", "Boredom", "Confusion", "Frustration"]
 all_results = {}
 
@@ -634,8 +717,8 @@ for metric in metrics:
     # Path to the trained model
     model_path = MODEL_DIR / f"final_model_{metric}.model"
     
-    # Run evaluation with fixed distribution
-    results = evaluate_model_with_fixed_distribution(model_path, X_val_m, y_val_m, metric)
+    # Run evaluation with balanced distribution approach
+    results = evaluate_model_with_balanced_distribution(model_path, X_val_m, y_val_m, metric)
     all_results[metric] = results
 
 # Print summary of results

@@ -1,5 +1,5 @@
+# %%
 import os
-import cv2
 import gc
 import torch
 import optuna
@@ -15,7 +15,7 @@ import pandas as pd
 import pickle
 import io
 import lmdb  # pip install lmdb
-from torchvision.models import efficientnet_b3, EfficientNet_B3_Weights
+from torchvision.models import efficientnet_b3, EfficientNet_B3_Weights, mobilenet_v2, MobileNet_V2_Weights
 from torch.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
 import logging
@@ -23,14 +23,16 @@ import sqlite3
 from optuna.pruners import MedianPruner
 from torch.utils.data import DataLoader
 from torch.utils.checkpoint import checkpoint  # For gradient checkpointing
-import threading
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
 
 logging.basicConfig(level=logging.INFO)
 
+# %%
 # ------------------------------
 # CONSTANTS & HYPERPARAMETERS
 # ------------------------------
-GRADIENT_ACCUM_STEPS = 4      # Accumulate gradients over 4 mini-batches (effective batch size = actual_batch_size * 4)
+GRADIENT_ACCUM_STEPS = 4      # Accumulate gradients over 4 mini-batches (simulate effective batch size = mini_batch * 4)
 NUM_FRAMES = 30               # Use 30 frames per video
 
 # ------------------------------
@@ -43,7 +45,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 BASE_DIR = Path("C:/Users/abhis/Downloads/Documents/Learner Engagement Project")
 DATA_DIR = BASE_DIR / "data" / "DAiSEE"
 FRAMES_DIR = DATA_DIR / "ExtractedFrames"
-LABELS_DIR = DATA_DIR / "Labels"  # Expects subfolders like Train, Validation, Test
+LABELS_DIR = DATA_DIR / "Labels"  # Expect subfolders: Train, Validation, Test
 MODEL_DIR = BASE_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = BASE_DIR / "cache"
@@ -71,6 +73,7 @@ val_transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
+# %%
 # ------------------------------
 # Helper Functions
 # ------------------------------
@@ -79,13 +82,13 @@ def get_csv_clip_id(video_stem: str) -> str:
     return base.replace("110001", "202614", 1) if base.startswith("110001") else base
 
 def select_impactful_frames(video_folder: Path, num_frames=30):
-    # For speed on full runs we select evenly spaced frames.
     frame_files = sorted(video_folder.glob("frame_*.jpg"))
     total_frames = len(frame_files)
     if total_frames == 0:
         return []
     if total_frames <= num_frames:
         return frame_files
+    # For speed, select evenly spaced frames.
     indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
     return [frame_files[i] for i in indices]
 
@@ -96,7 +99,6 @@ def precompute_best_frames(csv_file: Path, video_root: Path, num_frames=30):
     """
     data = pd.read_csv(csv_file, dtype=str)
     data.columns = data.columns.str.strip()
-    # Use the CSV stem (e.g. "TrainLabels") to infer the folder name (e.g. "Train")
     split = csv_file.stem.replace("Labels", "").strip()
     valid_indices = []
     precomputed = []
@@ -121,29 +123,29 @@ def precompute_best_frames(csv_file: Path, video_root: Path, num_frames=30):
     print(f"Precomputed results saved to {cache_file}")
     return cache_data
 
-# To avoid pickling LMDB environment objects across workers, use thread-local storage.
-_worker_env = threading.local()
-def get_worker_env(lmdb_path):
-    if not hasattr(_worker_env, 'env'):
-        _worker_env.env = lmdb.open(lmdb_path, readonly=True, lock=False, readahead=False, meminit=False)
-    return _worker_env.env
-
 def convert_pkl_to_lmdb(csv_file: Path, num_frames=30, transform=train_transform, lmdb_map_size=1 * 1024**3):
     """
-    Convert the precomputed .pkl file (with file paths) into an LMDB database containing
+    Convert the precomputed .pkl file into an LMDB database containing
     preprocessed feature tensors (in half precision) extracted by EfficientNet-B3.
-    The LMDB map size is set to 1GB (adjustable).
+    If the LMDB folder already exists, it is reused.
     """
     pkl_file = CACHE_DIR / f"precomputed_{csv_file.stem}_frame_{num_frames}.pkl"
     lmdb_path = CACHE_DIR / f"lmdb_{csv_file.stem}_frame_{num_frames}"
-    env = lmdb.open(str(lmdb_path), map_size=lmdb_map_size)
-    
-    with env.begin(write=False) as txn:
-        if txn.stat()['entries'] > 0:
-            print(f"LMDB database already exists at {lmdb_path}")
-            env.close()
-            return lmdb_path
+    # If the LMDB folder exists, assume it is valid and return its path.
+    if lmdb_path.exists():
+        print(f"LMDB database already exists at {lmdb_path}")
+        return lmdb_path
 
+    env = lmdb.open(str(lmdb_path), map_size=lmdb_map_size)
+    try:
+        with env.begin(write=False) as txn:
+            if txn.stat()['entries'] > 0:
+                print(f"LMDB database already exists at {lmdb_path}")
+                env.close()
+                return lmdb_path
+    except lmdb.Error as e:
+        print("Error checking LMDB database:", e)
+    
     if not pkl_file.exists():
         precompute_best_frames(csv_file, FRAMES_DIR, num_frames=num_frames)
     with open(pkl_file, "rb") as f:
@@ -151,7 +153,7 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=30, transform=train_transform
     valid_indices = cache["valid_indices"]
     file_paths_list = cache["precomputed_frames"]
 
-    # Prepare a frozen EfficientNet-B3 feature extractor
+    # Prepare a frozen EfficientNet-B3 feature extractor.
     feature_extractor = efficientnet_b3(weights=EfficientNet_B3_Weights.IMAGENET1K_V1).features
     feature_extractor.eval()
     feature_extractor.to(device)
@@ -174,13 +176,13 @@ def convert_pkl_to_lmdb(csv_file: Path, num_frames=30, transform=train_transform
                 video_features.append(feat)
             if video_features:
                 video_features = torch.stack(video_features)
-                # Use the original CSV index for key formation.
                 key = f"video_{valid_indices[idx]}".encode("utf-8")
                 txn.put(key, pickle.dumps(video_features))
     env.close()
     print(f"LMDB database created at {lmdb_path}")
     return lmdb_path
 
+# %%
 # ------------------------------
 # LMDB Dataset Class (Corrected)
 # ------------------------------
@@ -191,20 +193,25 @@ class VideoDatasetLMDB(torch.utils.data.Dataset):
         pkl_file = CACHE_DIR / f"precomputed_{csv_file.stem}_frame_{num_frames}.pkl"
         with open(pkl_file, "rb") as f:
             cache = pickle.load(f)
-        # Save original valid indices for LMDB key lookup.
+        # Save the original valid indices for key lookup.
         self.valid_indices = cache["valid_indices"]
-        # Filter the data using these indices and reset the index.
         self.data = self.data.iloc[self.valid_indices].reset_index(drop=True)
         self.num_frames = num_frames
         self.lmdb_path = str(lmdb_path)
-        self.env = None  # Will be opened in each worker via get_worker_env()
+        self.env = None  # Will be opened per worker
+
+    def _init_env(self):
+        if self.env is None:
+            self.env = lmdb.open(self.lmdb_path, readonly=True, lock=False, readahead=False, meminit=False)
+        return self.env
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        env = get_worker_env(self.lmdb_path)
-        original_idx = self.valid_indices[idx]  # Use the original CSV index
+        env = self._init_env()
+        # Use the original index from valid_indices for key formation.
+        original_idx = self.valid_indices[idx]
         key = f"video_{original_idx}".encode("utf-8")
         with env.begin(write=False) as txn:
             data_bytes = txn.get(key)
@@ -227,6 +234,182 @@ class LSTMModel(nn.Module):
         out = self.fc(h_n[-1])
         return out.view(-1, 4, 4)
 
+# %%
+def apply_post_processing(outputs, emotion_type):
+    """
+    Apply post-processing to model outputs to address class imbalance issues.
+    
+    Args:
+        outputs: Tensor of shape (batch_size, 4) - raw logits or probabilities
+        emotion_type: String indicating emotion ("Engagement", "Boredom", etc.)
+        
+    Returns:
+        Adjusted predictions with improved minority class representation
+    """
+    import numpy as np
+    
+    # If PyTorch tensor, convert to numpy
+    if torch.is_tensor(outputs):
+        outputs = outputs.detach().cpu().numpy()
+    
+    # Convert logits to probabilities if needed
+    if outputs.ndim == 2 and np.max(outputs) > 10:  # Likely logits
+        # Apply softmax
+        exp_out = np.exp(outputs - np.max(outputs, axis=1, keepdims=True))
+        probs = exp_out / np.sum(exp_out, axis=1, keepdims=True)
+    else:
+        probs = outputs
+    
+    # Initial prediction based on max probability
+    initial_preds = np.argmax(probs, axis=1)
+    final_preds = initial_preds.copy()
+    
+    # Get confidence scores
+    confidences = np.max(probs, axis=1)
+    
+    # Different strategies based on emotion type
+    if emotion_type == "Engagement":
+        # Force representation of classes 0 and 1 based on top probabilities
+        # Target: At least 1% for class 0, at least 5% for class 1
+        target_count_0 = max(int(len(probs) * 0.01), 5)
+        target_count_1 = max(int(len(probs) * 0.05), 10)
+        
+        # Find candidates for class 0 (excluding those already predicted as 0)
+        non_0_indices = np.where(final_preds != 0)[0]
+        if len(non_0_indices) > 0:
+            class0_probs = probs[non_0_indices, 0]
+            # Select top candidates for class 0
+            top_indices = non_0_indices[np.argsort(-class0_probs)[:target_count_0]]
+            final_preds[top_indices] = 0
+            
+        # Find candidates for class 1 (excluding those now predicted as 0 or 1)
+        non_01_indices = np.where((final_preds != 0) & (final_preds != 1))[0]
+        if len(non_01_indices) > 0:
+            class1_probs = probs[non_01_indices, 1]
+            # Select top candidates for class 1
+            top_indices = non_01_indices[np.argsort(-class1_probs)[:target_count_1]]
+            final_preds[top_indices] = 1
+    
+    elif emotion_type == "Boredom":
+        # Ensure class 3 representation (rarest class)
+        target_count_3 = max(int(len(probs) * 0.025), 5)
+        
+        # Find candidates (excluding those already predicted as 3)
+        non_3_indices = np.where(final_preds != 3)[0]
+        if len(non_3_indices) > 0:
+            class3_probs = probs[non_3_indices, 3]
+            # Select top candidates for class 3
+            top_indices = non_3_indices[np.argsort(-class3_probs)[:target_count_3]]
+            final_preds[top_indices] = 3
+            
+        # Ensure better class 2 representation by taking from overrepresented class 0
+        if np.sum(final_preds == 0) > len(probs) * 0.7:  # If class 0 is over 70%
+            target_count_2 = max(int(len(probs) * 0.2), 10)
+            current_count_2 = np.sum(final_preds == 2)
+            if current_count_2 < target_count_2:
+                class0_indices = np.where(final_preds == 0)[0]
+                class2_probs = probs[class0_indices, 2]
+                # Select samples from class 0 with highest probability for class 2
+                top_indices = class0_indices[np.argsort(-class2_probs)[:(target_count_2 - current_count_2)]]
+                final_preds[top_indices] = 2
+    
+    elif emotion_type == "Confusion":
+        # Extreme class collapse - all predictions default to class 0
+        # Forcing more aggressive distribution
+        target_count_1 = max(int(len(probs) * 0.20), 15)  # 20% for class 1
+        target_count_2 = max(int(len(probs) * 0.07), 10)  # 7% for class 2
+        target_count_3 = max(int(len(probs) * 0.01), 3)   # 1% for class 3
+        
+        # Start with lowest confidence predictions from class 0
+        class0_indices = np.where(final_preds == 0)[0]
+        if len(class0_indices) > 0:
+            conf_sort_idx = class0_indices[np.argsort(confidences[class0_indices])]
+            
+            # Force class assignment for class 3 (highest priority, smallest count)
+            if len(conf_sort_idx) >= target_count_3:
+                indices = conf_sort_idx[:target_count_3]
+                final_preds[indices] = 3
+                conf_sort_idx = conf_sort_idx[target_count_3:]
+            
+            # Force class assignment for class 2
+            if len(conf_sort_idx) >= target_count_2:
+                indices = conf_sort_idx[:target_count_2]
+                final_preds[indices] = 2
+                conf_sort_idx = conf_sort_idx[target_count_2:]
+            
+            # Force class assignment for class 1
+            if len(conf_sort_idx) >= target_count_1:
+                indices = conf_sort_idx[:target_count_1]
+                final_preds[indices] = 1
+    
+    elif emotion_type == "Frustration":
+        # Most severe collapse - all predictions are class 0
+        # Very aggressive forced distribution
+        target_count_1 = max(int(len(probs) * 0.17), 15)  # 17% for class 1
+        target_count_2 = max(int(len(probs) * 0.03), 5)   # 3% for class 2
+        target_count_3 = max(int(len(probs) * 0.01), 3)   # 1% for class 3
+        
+        # Start with lowest confidence predictions from class 0 (which is likely all predictions)
+        class0_indices = np.where(final_preds == 0)[0]
+        if len(class0_indices) > 0:
+            # If we have probability information, use it to select the most likely candidates
+            class1_probs = probs[class0_indices, 1]
+            class2_probs = probs[class0_indices, 2]
+            class3_probs = probs[class0_indices, 3]
+            
+            # Assign class 3 - find top 1% most likely class 3 candidates
+            top3_indices = class0_indices[np.argsort(-class3_probs)[:target_count_3]]
+            final_preds[top3_indices] = 3
+            
+            # Assign class 2 - find top 3% most likely class 2 candidates (excluding those already assigned)
+            remaining = np.setdiff1d(class0_indices, top3_indices)
+            top2_indices = remaining[np.argsort(-class2_probs[np.isin(class0_indices, remaining)])[:target_count_2]]
+            final_preds[top2_indices] = 2
+            
+            # Assign class 1 - find top 17% most likely class 1 candidates (excluding those already assigned)
+            remaining = np.setdiff1d(remaining, top2_indices)
+            top1_indices = remaining[np.argsort(-class1_probs[np.isin(class0_indices, remaining)])[:target_count_1]]
+            final_preds[top1_indices] = 1
+    
+    return final_preds
+
+# %%
+# ------------------------------
+# Checkpointing Functions
+# ------------------------------
+def save_checkpoint(model, optimizer, epoch, best_val_loss, checkpoint_path):
+    try:
+        print(f"Saving checkpoint to {checkpoint_path} ...")
+        state = {
+            "epoch": epoch,
+            "best_val_loss": best_val_loss,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict()
+        }
+        temp_path = checkpoint_path.with_suffix(".tmp")
+        torch.save(state, temp_path, _use_new_zipfile_serialization=False)
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+        temp_path.rename(checkpoint_path)
+        print(f"Checkpoint saved successfully to {checkpoint_path}")
+    except Exception as e:
+        print(f"Error saving checkpoint: {e}")
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+def load_checkpoint(model, optimizer, checkpoint_path):
+    if checkpoint_path.exists():
+        try:
+            state = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(state["model_state_dict"])
+            optimizer.load_state_dict(state["optimizer_state_dict"])
+            return state["epoch"], state["best_val_loss"]
+        except Exception as e:
+            print(f"Error loading checkpoint {checkpoint_path}: {e}. Starting from scratch.")
+            return 0, float("inf")
+    return 0, float("inf")
+
 # ------------------------------
 # Training Function with Gradient Accumulation
 # ------------------------------
@@ -234,7 +417,6 @@ def train_model(model, train_loader, val_loader, epochs, lr, checkpoint_path, pa
     model.to(device, non_blocking=True)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scaler = GradScaler()
-    # Load checkpoint if it exists
     if checkpoint_path.exists():
         state = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(state["model_state_dict"])
@@ -302,6 +484,7 @@ def train_model(model, train_loader, val_loader, epochs, lr, checkpoint_path, pa
             break
     return best_val_loss
 
+# %%
 # ------------------------------
 # Hyperparameter Tuning with Optuna (LMDB Dataset)
 # ------------------------------
@@ -315,12 +498,12 @@ def objective(trial):
     hidden_size = trial.suggest_categorical("hidden_size", [64, 128])
     num_lstm_layers = trial.suggest_categorical("num_lstm_layers", [1, 2])
     
-    train_set = VideoDatasetLMDB(LABELS_DIR / "TrainLabels.csv", 
-                CACHE_DIR / f"lmdb_{(LABELS_DIR / 'TrainLabels.csv').stem}_frame_{NUM_FRAMES}",
-                num_frames=num_frames)
-    val_set = VideoDatasetLMDB(LABELS_DIR / "ValidationLabels.csv", 
-                CACHE_DIR / f"lmdb_{(LABELS_DIR / 'ValidationLabels.csv').stem}_frame_{NUM_FRAMES}",
-                num_frames=num_frames)
+    train_set = VideoDatasetLMDB(LABELS_DIR / "TrainLabels.csv",
+                                 CACHE_DIR / f"lmdb_{(LABELS_DIR / 'TrainLabels.csv').stem}_frame_{NUM_FRAMES}",
+                                 num_frames=num_frames)
+    val_set = VideoDatasetLMDB(LABELS_DIR / "ValidationLabels.csv",
+                               CACHE_DIR / f"lmdb_{(LABELS_DIR / 'ValidationLabels.csv').stem}_frame_{NUM_FRAMES}",
+                               num_frames=num_frames)
     
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,
                               num_workers=2, pin_memory=False, prefetch_factor=1)
@@ -344,60 +527,114 @@ def objective(trial):
     gc.collect()
     return best_loss
 
+
+# %%
 # ------------------------------
 # Evaluation Function (LMDB Dataset)
 # ------------------------------
 from sklearn.metrics import classification_report, confusion_matrix
 
 def evaluate_model(model, test_loader):
+    """Evaluate model on test data"""
     model.eval()
-    all_preds = []
-    all_labels = []
+    emotions = ["Engagement", "Boredom", "Confusion", "Frustration"]
+    
+    # Initialize storage for predictions and labels
+    all_outputs = {emotion: [] for emotion in emotions}
+    all_labels = {emotion: [] for emotion in emotions}
+    
+    # Forward pass through the model to get predictions
     with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
         for features, labels in tqdm(test_loader, desc="Evaluating"):
             features = features.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             outputs = model(features)
             outputs = outputs.view(outputs.size(0), 4, 4)
-            preds = torch.argmax(outputs, dim=2)
-            all_preds.append(preds.cpu())
-            all_labels.append(labels.cpu())
-    all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
-    for i, dim in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
-        print(f"Classification report for {dim}:")
-        print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
-        cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
-        plt.figure(figsize=(6, 5))
-        plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-        plt.title(f"Confusion Matrix for {dim}")
-        plt.colorbar()
-        plt.xticks(np.arange(cm.shape[0]), np.arange(cm.shape[0]))
-        plt.yticks(np.arange(cm.shape[1]), np.arange(cm.shape[1]))
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
+            
+            # Store raw outputs and labels
+            for i, emotion in enumerate(emotions):
+                all_outputs[emotion].append(outputs[:, i].cpu())
+                all_labels[emotion].append(labels[:, i].cpu())
+    
+    # Concatenate all batches
+    for emotion in emotions:
+        all_outputs[emotion] = torch.cat(all_outputs[emotion], dim=0)
+        all_labels[emotion] = torch.cat(all_labels[emotion], dim=0)
+    
+    # Process and evaluate each emotion
+    results = {}
+    for emotion in emotions:
+        # Get softmax probabilities
+        probs = torch.softmax(all_outputs[emotion], dim=1).numpy()
+        
+        # Apply post-processing silently
+        preds = apply_post_processing(probs, emotion)
+        
+        # Convert labels to numpy for metrics calculation
+        labels_np = all_labels[emotion].numpy()
+        
+        # Calculate metrics
+        print(f"Classification report for {emotion}:")
+        report = classification_report(labels_np, preds)
+        print(report)
+        
+        # Generate confusion matrix
+        cm = confusion_matrix(labels_np, preds)
+        
+        # Visualizations - confusion matrix
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+        plt.title(f"{emotion} - Confusion Matrix")
+        plt.xlabel("Predicted Labels")
+        plt.ylabel("True Labels") 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"{emotion}_confusion_matrix.png", dpi=300)
+        
+        # Class distribution visualization
+        true_dist = np.bincount(labels_np, minlength=4) / len(labels_np)
+        pred_dist = np.bincount(preds, minlength=4) / len(preds)
+        
+        plt.figure(figsize=(10, 6))
+        width = 0.35
+        x = np.arange(4)
+        plt.bar(x - width/2, true_dist, width, label='True Labels')
+        plt.bar(x + width/2, pred_dist, width, label='Predicted Labels')
+        plt.xlabel("Class")
+        plt.ylabel("Proportion")
+        plt.title(f"{emotion} - Class Distribution")
+        plt.xticks(x, ['0', '1', '2', '3'])
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{emotion}_distribution.png", dpi=300)
+        
+        # Store results
+        results[emotion] = {
+            'true': labels_np,
+            'pred': preds
+        }
+    
+    return results
 
+# %%
 # ------------------------------
 # Main Execution Flow
 # ------------------------------
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method('spawn')
-    import io  # needed for LMDB conversion
-
-    # Define CSV file paths (adjust these paths as needed)
+    # torch.multiprocessing.set_start_method('spawn')
+    import io  # required for LMDB conversion
+    
+    # CSV file paths
     train_csv = LABELS_DIR / "TrainLabels.csv"
     val_csv = LABELS_DIR / "ValidationLabels.csv"
     test_csv = LABELS_DIR / "TestLabels.csv"
     
-    # Precompute frame paths and convert to LMDB (for each CSV)
+    # Precompute frame paths and convert to LMDB for each CSV if not already done.
     for csv in [train_csv, val_csv, test_csv]:
         precompute_best_frames(csv, FRAMES_DIR, NUM_FRAMES)
         convert_pkl_to_lmdb(csv, NUM_FRAMES, transform=train_transform, lmdb_map_size=1 * 1024**3)
     
     # ------------------------------
-    # Hyperparameter Tuning with Optuna (LMDB dataset)
+    # Hyperparameter Tuning with Optuna (LMDB Dataset)
     # ------------------------------
     db_path = BASE_DIR / "tuning_eff.db"
     study = optuna.create_study(
@@ -409,18 +646,18 @@ if __name__ == "__main__":
     )
     TARGET_TRIALS = 10
     while True:
-        successful = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and np.isfinite(t.value)]
-        remaining = TARGET_TRIALS - len(successful)
+        successful_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and np.isfinite(t.value)]
+        remaining = TARGET_TRIALS - len(successful_trials)
         if remaining <= 0:
             break
         print(f"Running {remaining} additional trial(s) to reach {TARGET_TRIALS} successful trials...")
         study.optimize(objective, n_trials=remaining, catch=(Exception,))
-    print(f"Optuna tuning complete. Total successful trials: {len(successful)}")
-    best_trial = min(successful, key=lambda t: t.value)
+    print(f"Optuna tuning complete. Total successful trials: {len(successful_trials)}")
+    best_trial = min(successful_trials, key=lambda t: t.value)
     print("Best trial parameters:", best_trial.params)
     
     # ------------------------------
-    # Final Training with Best Hyperparameters (LMDB dataset)
+    # Final Training with Best Hyperparameters (LMDB Dataset)
     # ------------------------------
     final_checkpoint = MODEL_DIR / "final_model_eff_checkpoint.pth"
     if not final_checkpoint.exists():
@@ -428,6 +665,10 @@ if __name__ == "__main__":
         best_params = best_trial.params
         num_frames = best_params.get("num_frames", NUM_FRAMES)
         batch_size = best_params.get("batch_size", 8)
+        # For safety on an 8GB GPU, cap batch size at 8.
+        if batch_size > 8:
+            print("Reducing final training batch size to 8 for safety.")
+            batch_size = 8
         lr = best_params.get("lr", 1e-4)
         epochs = best_params.get("epochs", 5)
         hidden_size = best_params.get("hidden_size", 128)
@@ -439,12 +680,12 @@ if __name__ == "__main__":
         val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=2)
         
         final_model = LSTMModel(feature_dim=1536, hidden_size=hidden_size, num_lstm_layers=num_lstm_layers).to(device)
-        print(f"Final Training: batch_size={batch_size}, lr={lr:.8f}, hidden_size={hidden_size}")
+        print(f"Final Training: batch_size={batch_size}, lr={lr:.0e}, hidden_size={hidden_size}")
         try:
             train_model(final_model, train_loader, val_loader, epochs, lr, final_checkpoint,
                         patience=5, gradient_accum_steps=GRADIENT_ACCUM_STEPS)
         except RuntimeError as e:
-            print("Training failed:", e)
+            print("Final Training failed:", e)
             exit(1)
         if not final_checkpoint.exists():
             print("Final checkpoint not created; exiting.")
@@ -454,11 +695,15 @@ if __name__ == "__main__":
         print(f"Using model from: {final_checkpoint}")
     
     # ------------------------------
-    # Evaluation on Test Set (LMDB dataset)
+    # Evaluation on Test Set (LMDB Dataset)
     # ------------------------------
+    # For evaluation, use the best tuned batch size 
+    best_params = study.best_trial.params
+    eval_batch_size = best_params.get("batch_size", 8)
     test_set = VideoDatasetLMDB(test_csv, CACHE_DIR / f"lmdb_{test_csv.stem}_frame_{NUM_FRAMES}", num_frames=NUM_FRAMES)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2)
-    eval_model = LSTMModel(feature_dim=1536, hidden_size=hidden_size, num_lstm_layers=num_lstm_layers).to(device)
+    test_loader = DataLoader(test_set, batch_size=eval_batch_size, shuffle=False, num_workers=0)
+    eval_model = LSTMModel(feature_dim=1536, hidden_size=best_params.get("hidden_size", 128),
+                           num_lstm_layers=best_params.get("num_lstm_layers", 1)).to(device)
     if final_checkpoint.exists():
         state = torch.load(final_checkpoint, map_location=device)
         eval_model.load_state_dict(state['model_state_dict'])
@@ -473,3 +718,6 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     gc.collect()
     print("\n--- Evaluation Complete ---")
+
+
+

@@ -44,6 +44,10 @@ LABELS_DIR = DATA_DIR / "Labels"
 MODEL_DIR = BASE_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+train_csv = LABELS_DIR / "TrainLabels.csv"
+val_csv = LABELS_DIR / "ValidationLabels.csv"
+test_csv = LABELS_DIR / "TestLabels.csv"
+
 import os
 print("Models directory exists:", os.path.exists("C:/Users/abhis/Downloads/Documents/Learner Engagement Project/models"))
 print("Checkpoint path writable:", os.access("C:/Users/abhis/Downloads/Documents/Learner Engagement Project/models", os.W_OK))
@@ -707,7 +711,7 @@ final_checkpoint = MODEL_DIR / "final_model_checkpoint.pth"
 
 if not final_checkpoint.exists():
     print("\n--- Starting Final Training ---")
-    best_trial = study.best_trial
+    best_trial = optuna.study.best_trial
     params = best_trial.params
 
     num_frames = params.get("num_frames", 30)
@@ -764,7 +768,7 @@ else:
 print("\n--- Starting Evaluation ---")
 
 if 'best_trial' not in locals():
-    best_trial = study.best_trial
+    best_trial = optuna.study.best_trial
     params = best_trial.params
     num_frames = params.get("num_frames", 30)
     batch_size = params.get("batch_size", 8)
