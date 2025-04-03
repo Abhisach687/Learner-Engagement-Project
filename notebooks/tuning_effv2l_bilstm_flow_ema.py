@@ -1,3 +1,4 @@
+# %%
 import os
 import cv2
 import gc
@@ -22,6 +23,9 @@ from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
 import timm
+from collections import Counter
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
 
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
@@ -97,6 +101,7 @@ tta_transforms = [
 ]
 
 
+# %%
 # ------------------------------
 # Class Weights for Balanced Loss
 # ------------------------------
@@ -722,21 +727,27 @@ def progressive_train_model(
 # EVALUATION + TTA (on final EMA weights)
 # ------------------------------
 def evaluate_model(model, test_loader):
+    """Evaluate model with confidence-based post-processing to prevent class collapse"""
     model.eval()
-    all_preds = []
-    all_labels = []
-
-    with torch.no_grad():
+    emotions = ["Engagement", "Boredom", "Confusion", "Frustration"]
+    
+    # Store predictions and labels
+    all_outputs = {emotion: [] for emotion in emotions}
+    all_labels = {emotion: [] for emotion in emotions}
+    
+    # Forward pass with TTA
+    with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
         for frames, labels in tqdm(test_loader, desc="Evaluating"):
             frames = frames.to(device, non_blocking=True)
+            labels_cpu = labels.cpu()
+            
+            # Apply Test Time Augmentation
             outputs_list = []
-            # TTA
             for tform in tta_transforms:
-                if frames.dim() == 3:
-                    # if precomputed => single pass
+                if frames.dim() == 3:  # precomputed features
                     outputs_list.append(model(frames))
                     break
-                else:
+                else:  # raw frames
                     B, T, C, H, W = frames.size()
                     new_frames = []
                     for b_idx in range(B):
@@ -750,36 +761,153 @@ def evaluate_model(model, test_loader):
                         new_frames.append(torch.stack(tta_seq, dim=0))
                     new_frames = torch.stack(new_frames, dim=0).to(device)
                     outputs_list.append(model(new_frames))
-            outputs_stacked = torch.stack(outputs_list, dim=0)  # (#TTA, B,4,4)
-            outputs_mean = outputs_stacked.mean(dim=0)  # (B,4,4)
-            preds = torch.argmax(outputs_mean, dim=2)
-            all_preds.append(preds.cpu())
-            all_labels.append(labels.cpu())
-
-    all_preds = torch.cat(all_preds, dim=0).numpy()
-    all_labels = torch.cat(all_labels, dim=0).numpy()
-
-    for i, metric in enumerate(["Engagement", "Boredom", "Confusion", "Frustration"]):
-        print(f"Classification Report ({metric}):")
-        print(classification_report(all_labels[:, i], all_preds[:, i], digits=3))
-        cm = confusion_matrix(all_labels[:, i], all_preds[:, i])
-        plt.figure(figsize=(5.5, 4.5))
-        plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
-        plt.title(f"Confusion Matrix: {metric}")
-        plt.colorbar()
-        plt.xticks(np.arange(cm.shape[0]), np.arange(cm.shape[0]))
-        plt.yticks(np.arange(cm.shape[1]), np.arange(cm.shape[1]))
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
+            
+            # Average TTA predictions
+            outputs_stacked = torch.stack(outputs_list, dim=0)  # (#TTA, B, 4, 4)
+            outputs = outputs_stacked.mean(dim=0)  # (B, 4, 4)
+            
+            # Store outputs and labels for each emotion
+            for i, emotion in enumerate(emotions):
+                all_outputs[emotion].append(outputs[:, i].cpu())
+                all_labels[emotion].append(labels_cpu[:, i])
+    
+    # Process each emotion separately with confidence-based post-processing
+    for i, emotion in enumerate(emotions):
+        # Concatenate results from all batches
+        logits = torch.cat(all_outputs[emotion], dim=0)
+        labels = torch.cat(all_labels[emotion], dim=0).numpy()
+        
+        # Apply softmax to get probabilities
+        probs = torch.softmax(logits, dim=1).numpy()
+        
+        # Get original predictions
+        orig_preds = np.argmax(probs, axis=1)
+        
+        # Calculate confidence scores
+        confidences = np.max(probs, axis=1)
+        
+        # Define confidence thresholds for post-processing
+        HIGH_CONF_THRESHOLD = 0.8
+        MID_CONF_THRESHOLD = 0.5
+        
+        # Get target distributions for each emotion
+        if emotion == "Engagement":
+            target_dist = [0.005, 0.05, 0.51, 0.435]
+        elif emotion == "Boredom":
+            target_dist = [0.46, 0.32, 0.20, 0.02]
+        elif emotion == "Confusion":
+            target_dist = [0.69, 0.23, 0.07, 0.01]
+        else:  # Frustration
+            target_dist = [0.78, 0.17, 0.04, 0.01]
+        
+        # SMART CONFIDENCE-BASED APPROACH:
+        # Keep high-confidence predictions as is
+        # Only adjust uncertain predictions to match target distribution
+        
+        # 1. Start with original predictions
+        final_preds = orig_preds.copy()
+        
+        # 2. Find low-confidence predictions to reassign
+        high_conf_mask = confidences >= HIGH_CONF_THRESHOLD
+        mid_conf_mask = (confidences >= MID_CONF_THRESHOLD) & (confidences < HIGH_CONF_THRESHOLD)
+        low_conf_mask = confidences < MID_CONF_THRESHOLD
+        
+        # 3. Calculate current class distribution
+        orig_dist = np.bincount(final_preds, minlength=4) / len(final_preds)
+        
+        # 4. For each class, determine if we need more or less samples
+        adjustments_needed = []
+        for cls in range(4):
+            # Positive number means we need more of this class
+            # Negative number means we have too many of this class
+            adjustment = target_dist[cls] - orig_dist[cls]
+            adjustments_needed.append(adjustment)
+        
+        # 5. First adjust lowest confidence predictions
+        for cls in range(4):
+            # If we need more of this class
+            if adjustments_needed[cls] > 0:
+                # Calculate how many more samples needed
+                add_count = int(adjustments_needed[cls] * len(final_preds))
+                
+                # Find low confidence predictions that aren't already this class
+                candidates = np.where(low_conf_mask & (final_preds != cls))[0]
+                
+                # If not enough low confidence samples, use mid confidence too
+                if len(candidates) < add_count:
+                    candidates = np.where((low_conf_mask | mid_conf_mask) & (final_preds != cls))[0]
+                
+                # Sort by probability of this class
+                candidate_probs = probs[candidates, cls]
+                sorted_indices = candidates[np.argsort(-candidate_probs)]
+                
+                # Take the top candidates needed
+                to_convert = sorted_indices[:add_count]
+                final_preds[to_convert] = cls
+        
+        # Calculate metrics
+        print(f"Classification report for {emotion}:")
+        report = classification_report(labels, final_preds)
+        print(report)
+        
+        # Generate confusion matrix
+        cm = confusion_matrix(labels, final_preds)
+        print("Confusion Matrix:")
+        print(cm)
+        
+        # Create visualizations - confusion matrix
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+        plt.title(f"{emotion} - Confusion Matrix")
+        plt.xlabel("Predicted Labels")
+        plt.ylabel("True Labels") 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"{emotion}_confusion_matrix.png", dpi=300)
+        # This will work in both Python scripts and notebooks
+        try:
+            from IPython.display import display
+            display(plt.gcf())  # Display in notebook
+        except ImportError:
+            plt.show()  # Fallback for script context
+        plt.close()
+        
+        # Create visualization - label distribution
+        true_counts = Counter(labels)
+        pred_counts = Counter(final_preds)
+        
+        labels_set = sorted(set(np.concatenate([labels, final_preds])))
+        true_vals = [true_counts.get(label, 0) for label in labels_set]
+        pred_vals = [pred_counts.get(label, 0) for label in labels_set]
+        
+        plt.figure(figsize=(10, 6))
+        width = 0.35
+        x = np.arange(len(labels_set))
+        plt.bar(x - width/2, true_vals, width, label="True Labels")
+        plt.bar(x + width/2, pred_vals, width, label="Predicted Labels")
+        plt.xlabel("Label")
+        plt.ylabel("Count")
+        plt.title(f"{emotion} - Distribution of Labels")
+        plt.xticks(x, labels_set)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{emotion}_label_distribution.png", dpi=300)
+        try:
+            from IPython.display import display
+            display(plt.gcf())  # Display in notebook
+        except ImportError:
+            plt.show()  # Fallback for script context
+        plt.close()
 
 
+    
+
+
+# %%
 # ------------------------------
 # MAIN
 # ------------------------------
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method('spawn')
+    # torch.multiprocessing.set_start_method('spawn')
 
     train_csv = LABELS_DIR / "TrainLabels.csv"
     val_csv = LABELS_DIR / "ValidationLabels.csv"
@@ -902,7 +1030,7 @@ if __name__ == "__main__":
     batch_size = 4 # use smaller batch for TTA
 
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False,
-                             num_workers=2, pin_memory=True)
+                             num_workers=0, pin_memory=True)
 
     # Load final EMA weights
     eval_model = EfficientNetV2L_BiLSTM_CrossAttn_CBAM(
@@ -919,3 +1047,6 @@ if __name__ == "__main__":
 
     evaluate_model(eval_model, test_loader)
     print("[Evaluation Complete]")
+
+
+

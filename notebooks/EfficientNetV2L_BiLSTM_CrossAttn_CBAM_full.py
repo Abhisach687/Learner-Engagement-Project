@@ -572,7 +572,7 @@ def evaluate_model(model, test_loader):
         plt.ylabel("True Labels") 
         plt.tight_layout()
         plt.savefig(f"{emotion}_confusion_matrix.png", dpi=300)
-        display(plt.gcf())  # Display in notebook
+        # display(plt.gcf())  # Display in notebook
         plt.close()
         
         # Create visualization - label distribution
@@ -595,7 +595,7 @@ def evaluate_model(model, test_loader):
         plt.legend()
         plt.tight_layout()
         plt.savefig(f"{emotion}_label_distribution.png", dpi=300)
-        display(plt.gcf())  # Display in notebook
+        # display(plt.gcf())  # Display in notebook
         plt.close()
 
 # %%
