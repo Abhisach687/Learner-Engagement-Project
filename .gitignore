@@ -27,6 +27,7 @@ logs/
 /models/
 /notebooks/models_class
 /cache/
+/results/
 
 # Ignore all PNG images
 *.png
