@@ -27,3 +27,13 @@ logs/
 /models/
 /notebooks/models_class
 /cache/
+
+# Ignore all PNG images
+*.png
+
+# Ignore all JPG images
+*.jpg
+*.jpeg
+
+# Ignore all database files
+*.db
