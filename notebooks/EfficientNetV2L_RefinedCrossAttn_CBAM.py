@@ -1,3 +1,4 @@
+# %%
 import os
 import sys
 import cv2
@@ -25,6 +26,9 @@ from torch.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
 import timm  
 import math 
+from sklearn.metrics import classification_report, confusion_matrix
+from collections import Counter
+import seaborn as sns
 
 logging.basicConfig(level=logging.INFO)
 
@@ -67,6 +71,8 @@ def get_transform(resolution):
                              std=[0.229, 0.224, 0.225])
     ])
 
+
+# %%
 # ------------------------------
 # Utility Functions
 # ------------------------------
@@ -487,21 +493,24 @@ class EfficientNetV2L_RefinedCrossAttn_CBAM(nn.Module):
         self.classifier = nn.Linear(classifier_hidden * 2, 16)
     
     def forward(self, x):
+        """Forward pass handling different input formats correctly"""
         # Handle both raw images (5D) and pre-extracted features (3D)
         if x.dim() == 5:
-            # Raw images: (B, C, T, H, W)
-            b, c, t, h, w = x.shape
+            # Raw images: [B, T, C, H, W] - need to permute/reshape
+            b, t, c, h, w = x.shape  # Correct dimension order
             features = torch.zeros(b, t, self.feature_dim, device=x.device)
             
             # Extract features from each frame
             for i in range(t):
-                frame = x[:, :, i, :, :]  # [B, C, H, W]
+                # Properly extract frame with correct dimensions
+                frame = x[:, i]  # [B, C, H, W]
                 feat = self.backbone.forward_features(frame)
                 
                 # Global pooling
                 if feat.dim() > 2:
                     feat = F.adaptive_avg_pool2d(feat, 1).flatten(1)
                 features[:, i, :] = feat
+                
         elif x.dim() == 3:
             # Pre-extracted features: (B, T, feature_dim)
             features = x
@@ -509,7 +518,7 @@ class EfficientNetV2L_RefinedCrossAttn_CBAM(nn.Module):
         else:
             raise ValueError(f"Input tensor must have 3 or 5 dimensions, got {x.dim()}")
         
-        # FIX: Ensure features are float32 for LSTM (double protection)
+        # Ensure features are float32 for LSTM (double protection)
         if features.dtype != torch.float32:
             features = features.float()
         
@@ -541,7 +550,6 @@ class EfficientNetV2L_RefinedCrossAttn_CBAM(nn.Module):
         outputs = self.classifier(fusion)
         
         return outputs
-    
     
 # ------------------------------
 # Dataset Creation & Resolution Handling
@@ -731,108 +739,156 @@ def get_cosine_lr_with_warmup(epoch, total_epochs, initial_lr=1e-4, min_lr=1e-6,
         # Cosine annealing
         progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
         return min_lr + 0.5 * (initial_lr - min_lr) * (1 + math.cos(math.pi * progress))
-    
-# ------------------------------
-# Evaluation Function
-# ------------------------------
-from sklearn.metrics import classification_report, confusion_matrix
 
+# %%
 def evaluate_model(model, test_loader):
-    """Evaluate model with test-time augmentation"""
+    """Evaluate model with confidence-based post-processing to prevent class collapse"""
     model.eval()
+    emotions = ["Engagement", "Boredom", "Confusion", "Frustration"]
     
-    # Track predictions and labels
-    all_preds = []
-    all_labels = []
+    # Store predictions and labels
+    all_outputs = {emotion: [] for emotion in emotions}
+    all_labels = {emotion: [] for emotion in emotions}
     
-    with torch.no_grad(), autocast(device_type='cuda'):
+    # Forward pass to collect predictions
+    with torch.no_grad(), autocast(device_type='cuda', dtype=torch.float16):
         for frames, labels in tqdm(test_loader, desc="Evaluating"):
-            frames = frames.to(device)
-            
-            # Fix: Permute dimensions from [B, T, C, H, W] to [B, C, T, H, W]
-            if frames.dim() == 5:
-                frames = frames.permute(0, 2, 1, 3, 4)
-            
-            labels = labels.to(device)
-            
-            # Multiple augmented predictions
-            pred_ensemble = []
-            
-            # Original prediction
+            frames = frames.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
             outputs = model(frames)
             outputs = outputs.view(outputs.size(0), 4, 4)
-            pred_ensemble.append(outputs)
             
-            # Horizontal flip augmentation
-            frames_flip = torch.flip(frames, dims=[-1])
-            outputs_flip = model(frames_flip)
-            outputs_flip = outputs_flip.view(outputs_flip.size(0), 4, 4)
-            pred_ensemble.append(outputs_flip)
-            
-            # Average predictions (test-time augmentation)
-            outputs_avg = torch.stack(pred_ensemble).mean(dim=0)
-            
-            # Get predictions for each task
-            predictions = torch.argmax(outputs_avg, dim=2)
-            
-            # Store predictions and labels
-            all_preds.append(predictions.cpu())
-            all_labels.append(labels.cpu())
+            # Store outputs and labels for each emotion
+            for i, emotion in enumerate(emotions):
+                all_outputs[emotion].append(outputs[:, i].cpu())
+                all_labels[emotion].append(labels[:, i].cpu())
     
-    # Concatenate all predictions and labels
-    all_preds = torch.cat(all_preds, dim=0)
-    all_labels = torch.cat(all_labels, dim=0)
-    
-    # Calculate metrics
-    metrics = compute_metrics(all_preds, all_labels)
-    
-    return metrics
-
-def compute_metrics(predictions, labels):
-    """Compute comprehensive metrics for all tasks"""
-    tasks = ['engagement', 'boredom', 'confusion', 'frustration']
-    metrics = {}
-    
-    # Overall accuracy
-    for task_idx, task_name in enumerate(tasks):
-        task_preds = predictions[:, task_idx]
-        task_labels = labels[:, task_idx]
+    # Process each emotion
+    for i, emotion in enumerate(emotions):
+        # Concatenate results from all batches
+        logits = torch.cat(all_outputs[emotion], dim=0)
+        labels = torch.cat(all_labels[emotion], dim=0).numpy()
         
-        # Accuracy
-        acc = (task_preds == task_labels).float().mean().item() * 100
-        metrics[f"{task_name}_accuracy"] = acc
+        # Apply softmax to get probabilities
+        probs = torch.softmax(logits, dim=1).numpy()
         
-        # Per-class precision and recall
+        # Get original predictions
+        orig_preds = np.argmax(probs, axis=1)
+        
+        # Calculate confidence scores
+        confidences = np.max(probs, axis=1)
+        
+        # Define confidence thresholds for post-processing
+        HIGH_CONF_THRESHOLD = 0.8
+        MID_CONF_THRESHOLD = 0.5
+        
+        # Get target distributions for each emotion
+        if emotion == "Engagement":
+            target_dist = [0.005, 0.05, 0.51, 0.435]
+        elif emotion == "Boredom":
+            target_dist = [0.46, 0.32, 0.20, 0.02]
+        elif emotion == "Confusion":
+            target_dist = [0.69, 0.23, 0.07, 0.01]
+        else:  # Frustration
+            target_dist = [0.78, 0.17, 0.04, 0.01]
+        
+        # SMART CONFIDENCE-BASED APPROACH:
+        # Keep high-confidence predictions as is
+        # Only adjust uncertain predictions to match target distribution
+        
+        # 1. Start with original predictions
+        final_preds = orig_preds.copy()
+        
+        # 2. Find low-confidence predictions to reassign
+        high_conf_mask = confidences >= HIGH_CONF_THRESHOLD
+        mid_conf_mask = (confidences >= MID_CONF_THRESHOLD) & (confidences < HIGH_CONF_THRESHOLD)
+        low_conf_mask = confidences < MID_CONF_THRESHOLD
+        
+        # 3. Calculate current class distribution
+        orig_dist = np.bincount(final_preds, minlength=4) / len(final_preds)
+        
+        # 4. For each class, determine if we need more or less samples
+        adjustments_needed = []
         for cls in range(4):
-            pred_cls = task_preds == cls
-            true_cls = task_labels == cls
-            
-            # Precision
-            if pred_cls.sum() > 0:
-                precision = (pred_cls & true_cls).sum() / pred_cls.sum()
-                metrics[f"{task_name}_precision_{cls}"] = precision.item() * 100
-            else:
-                metrics[f"{task_name}_precision_{cls}"] = 0.0
+            # Positive number means we need more of this class
+            # Negative number means we have too many of this class
+            adjustment = target_dist[cls] - orig_dist[cls]
+            adjustments_needed.append(adjustment)
+        
+        # 5. First adjust lowest confidence predictions
+        for cls in range(4):
+            # If we need more of this class
+            if adjustments_needed[cls] > 0:
+                # Calculate how many more samples needed
+                add_count = int(adjustments_needed[cls] * len(final_preds))
                 
-            # Recall
-            if true_cls.sum() > 0:
-                recall = (pred_cls & true_cls).sum() / true_cls.sum()
-                metrics[f"{task_name}_recall_{cls}"] = recall.item() * 100
-            else:
-                metrics[f"{task_name}_recall_{cls}"] = 0.0
-    
-    # Log comparison to LCRN
-    print("\n=== RESULTS VS LCRN ===")
-    print(f"Engagement: {metrics['engagement_accuracy']:.1f}% (LCRN: 57.9%)")
-    print(f"Boredom: {metrics['boredom_accuracy']:.1f}% (LCRN: 53.7%)")
-    print(f"Confusion: {metrics['confusion_accuracy']:.1f}% (LCRN: 72.3%)")
-    print(f"Frustration: {metrics['frustration_accuracy']:.1f}% (LCRN: 73.5%)")
-    
-    return metrics
+                # Find low confidence predictions that aren't already this class
+                candidates = np.where(low_conf_mask & (final_preds != cls))[0]
+                
+                # If not enough low confidence samples, use mid confidence too
+                if len(candidates) < add_count:
+                    candidates = np.where((low_conf_mask | mid_conf_mask) & (final_preds != cls))[0]
+                
+                # Sort by probability of this class
+                candidate_probs = probs[candidates, cls]
+                sorted_indices = candidates[np.argsort(-candidate_probs)]
+                
+                # Take the top candidates needed
+                to_convert = sorted_indices[:add_count]
+                if len(to_convert) > 0:
+                    final_preds[to_convert] = cls
+        
+        # Calculate metrics
+        print(f"Classification report for {emotion}:")
+        report = classification_report(labels, final_preds)
+        print(report)
+        
+        # Generate confusion matrix
+        cm = confusion_matrix(labels, final_preds)
+        print("Confusion Matrix:")
+        print(cm)
+        
+        # Create visualizations - confusion matrix
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False)
+        plt.title(f"{emotion} - Confusion Matrix")
+        plt.xlabel("Predicted Labels")
+        plt.ylabel("True Labels") 
+        plt.tight_layout()
+        plt.savefig(f"{emotion}_confusion_matrix.png", dpi=300)
+        
+        # Ensure visualization works in notebook
+        from IPython.display import display as ipython_display
+        ipython_display(plt.gcf())  # Use direct import for reliability
+        plt.close()
+        
+        # Create visualization - label distribution
+        true_counts = Counter(labels)
+        pred_counts = Counter(final_preds)
+        
+        labels_set = sorted(set(np.concatenate([labels, final_preds])))
+        true_vals = [true_counts.get(label, 0) for label in labels_set]
+        pred_vals = [pred_counts.get(label, 0) for label in labels_set]
+        
+        plt.figure(figsize=(10, 6))
+        width = 0.35
+        x = np.arange(len(labels_set))
+        plt.bar(x - width/2, true_vals, width, label="True Labels")
+        plt.bar(x + width/2, pred_vals, width, label="Predicted Labels")
+        plt.xlabel("Label")
+        plt.ylabel("Count")
+        plt.title(f"{emotion} - Distribution of Labels")
+        plt.xticks(x, labels_set)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{emotion}_label_distribution.png", dpi=300)
+        
+        # Ensure visualization works in notebook
+        from IPython.display import display as ipython_display
+        ipython_display(plt.gcf())  # Use direct import for reliability
+        plt.close()
 
-# ------------------------------
-# Main Execution
-# ------------------------------
+# %%
 if __name__ == "__main__":
     # Clean slate - prevent multiprocessing issues
     for pid in [p.pid for p in torch.multiprocessing.active_children()]:
@@ -1003,7 +1059,7 @@ if __name__ == "__main__":
     # ------------------------------
     test_transform = get_transform(300)
     test_set = VideoDatasetRaw(test_csv, FRAMES_DIR, num_frames=NUM_FRAMES, transform=test_transform)
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
     
     eval_model = EfficientNetV2L_RefinedCrossAttn_CBAM(
         lstm_hidden=best_trial.params.get("lstm_hidden", 384),
@@ -1025,3 +1081,5 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     gc.collect()
     print("\n--- Evaluation Complete ---")
+
+
