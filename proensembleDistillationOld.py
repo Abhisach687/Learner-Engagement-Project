@@ -661,7 +661,7 @@ class Distiller:
             probs: numpy array of shape [batch_size, 4] with class probabilities
             emotion: string indicating which emotion ("Engagement", "Boredom", etc.)
             preserve_accuracy: if True, prioritize preserving accuracy over exact distribution matching
-                
+            
         Returns:
             numpy array of post-processed class predictions
         """
@@ -673,27 +673,35 @@ class Distiller:
         
         # Define target distributions based on validation data patterns
         target_dists = {
-            "Engagement": [0.004, 0.049, 0.515, 0.432],  # Closer to true distribution
+            "Engagement": [0.005, 0.049, 0.515, 0.431],  # Closer to true distribution
             "Boredom": [0.456, 0.317, 0.205, 0.022],     # Match true distribution closely
             "Confusion": [0.693, 0.225, 0.071, 0.011],   # Match true distribution closely
             "Frustration": [0.781, 0.171, 0.034, 0.014]  # Match true distribution closely
         }
         
-        # Define confidence thresholds - emotion-specific thresholds
-        confidence_thresholds = {
-            "Engagement": 0.85 if preserve_accuracy else 0.70,
-            "Boredom": 0.65 if preserve_accuracy else 0.50,  # Lower threshold for Boredom
-            "Confusion": 0.90 if preserve_accuracy else 0.75,
-            "Frustration": 0.90 if preserve_accuracy else 0.75
+        # Define minimum representation to ensure (as percentage)
+        min_representation = {
+            "Engagement": [0.001, 0.01, 0.40, 0.40],    # Ensure at least some representation
+            "Boredom": [0.40, 0.10, 0.05, 0.005],      # Ensure at least some representation
+            "Confusion": [0.65, 0.15, 0.01, 0.001],    # Ensure at least some representation
+            "Frustration": [0.70, 0.15, 0.01, 0.001]   # Ensure at least some representation
         }
         
-        # Maximum percentage of predictions we're willing to change
-        max_change_percent = {
-            "Engagement": 0.15 if preserve_accuracy else 0.30,
-            "Boredom": 0.40 if preserve_accuracy else 0.50,  # More aggressive for Boredom
-            "Confusion": 0.10 if preserve_accuracy else 0.25,
-            "Frustration": 0.10 if preserve_accuracy else 0.25
+        # Define confidence thresholds - stricter to preserve accuracy
+        base_threshold = 0.90 if preserve_accuracy else 0.70
+        confidence_thresholds = {
+            "Engagement": base_threshold,
+            "Boredom": base_threshold,
+            "Confusion": base_threshold,
+            "Frustration": base_threshold
         }
+        
+        # Define probability ratio thresholds - candidate class probability should be at least
+        # this fraction of the original class probability to consider switching
+        prob_ratio_threshold = 0.7 if preserve_accuracy else 0.4
+        
+        # Maximum percentage of predictions we're willing to change
+        max_change_percent = 0.20 if preserve_accuracy else 0.40
         
         # Start with original predictions
         final_preds = orig_preds.copy()
@@ -702,99 +710,101 @@ class Distiller:
         threshold = confidence_thresholds.get(emotion, 0.80)
         can_modify = confidences < threshold
         
-        # Calculate current distribution
+        # FIRST STEP: Ensure minimum representation for each class
         current_counts = np.bincount(final_preds, minlength=4)
         current_dist = current_counts / len(probs)
         
+        # Calculate how many samples needed for minimum representation
+        min_rep = min_representation[emotion]
+        min_counts = np.array([int(len(probs) * p) for p in min_rep])
+        
         # Track how many predictions we've modified
         modified_count = 0
-        max_modifications = int(len(probs) * max_change_percent[emotion])
+        max_modifications = int(len(probs) * max_change_percent)
         
-        # Special handling for Boredom - most problematic class
-        if emotion == "Boredom":
-            # CRITICAL FIX: Many class 0 samples are misclassified as class 1
-            # Look for class 1 predictions that should be class 0
-            class0_probs = probs[:, 0]
-            class1_preds = np.where((final_preds == 1) & (class0_probs > 0.3) & can_modify)[0]
-            if len(class1_preds) > 0:
-                # Sort by probability of being class 0
-                sorted_indices = class1_preds[np.argsort(-class0_probs[class1_preds])]
-                # Take up to 35% of these samples
-                num_to_change = min(int(len(sorted_indices) * 0.35), max_modifications - modified_count)
-                change_indices = sorted_indices[:num_to_change]
-                final_preds[change_indices] = 0
-                modified_count += num_to_change
-                current_counts = np.bincount(final_preds, minlength=4)
-            
-            # Ensure some class 3 representation
-            target_class3 = max(int(len(probs) * 0.015), 5)  # At least 1.5% or 5 samples
-            if current_counts[3] < target_class3 and modified_count < max_modifications:
-                class3_probs = probs[:, 3]
-                candidates = np.where((final_preds != 3) & (class3_probs > 0.15) & can_modify)[0]
-                if len(candidates) > 0:
-                    sorted_indices = candidates[np.argsort(-class3_probs[candidates])]
-                    num_to_change = min(target_class3 - current_counts[3], len(sorted_indices), max_modifications - modified_count)
-                    change_indices = sorted_indices[:num_to_change]
-                    final_preds[change_indices] = 3
-                    modified_count += num_to_change
-                    current_counts = np.bincount(final_preds, minlength=4)
-            
-            # Improve class 2 representation
-            target_class2 = max(int(len(probs) * 0.18), 15)  # At least 18% or 15 samples
-            if current_counts[2] < target_class2 and modified_count < max_modifications:
-                class2_probs = probs[:, 2]
-                candidates = np.where((final_preds != 2) & (final_preds != 3) & (class2_probs > 0.2) & can_modify)[0]
-                if len(candidates) > 0:
-                    sorted_indices = candidates[np.argsort(-class2_probs[candidates])]
-                    num_to_change = min(target_class2 - current_counts[2], len(sorted_indices), max_modifications - modified_count)
-                    change_indices = sorted_indices[:num_to_change]
-                    final_preds[change_indices] = 2
-                    modified_count += num_to_change
-        
-        # Special handling for Engagement - minor adjustments
-        elif emotion == "Engagement":
-            # Keep mostly original but ensure minimal class 0 and 1 representation
-            for cls in [0, 1]:
-                min_count = int(len(probs) * 0.005) if cls == 0 else int(len(probs) * 0.03)
-                if current_counts[cls] < min_count and modified_count < max_modifications:
-                    cls_probs = probs[:, cls]
-                    candidates = np.where((final_preds != cls) & (cls_probs > 0.2) & can_modify)[0]
-                    if len(candidates) > 0:
-                        sorted_indices = candidates[np.argsort(-cls_probs[candidates])]
-                        num_to_change = min(min_count - current_counts[cls], len(sorted_indices), max_modifications - modified_count)
-                        change_indices = sorted_indices[:num_to_change]
-                        final_preds[change_indices] = cls
-                        modified_count += num_to_change
-            
-            # Improve balance between classes 2 and 3 (but very conservatively)
-            if modified_count < int(max_modifications * 0.5):
-                target_ratio = target_dists["Engagement"][2] / target_dists["Engagement"][3]  # ~1.2
-                current_ratio = current_counts[2] / max(current_counts[3], 1)
+        # Process each class to ensure minimum representation
+        for cls in range(4):
+            if current_counts[cls] < min_counts[cls]:
+                # We need more of this class - look for high confidence candidates
+                # Sort all samples by their probability for this class
+                cls_probs = probs[:, cls]
                 
-                if current_ratio > 1.5 * target_ratio:  # Too many class 2 compared to 3
-                    candidates = np.where((final_preds == 2) & (probs[:, 3] > 0.35) & can_modify)[0]
-                    if len(candidates) > 0:
-                        sorted_indices = candidates[np.argsort(-probs[candidates, 3])]
-                        num_to_change = min(int(len(sorted_indices) * 0.1), max_modifications - modified_count)
-                        change_indices = sorted_indices[:num_to_change]
-                        final_preds[change_indices] = 3
-                        modified_count += num_to_change
+                # Find candidates that aren't already this class and can be modified
+                candidates = np.where((final_preds != cls) & can_modify)[0]
+                if len(candidates) > 0:
+                    # Sort by probability for this class (highest first)
+                    candidate_probs = cls_probs[candidates]
+                    sorted_indices = candidates[np.argsort(-candidate_probs)]
+                    
+                    # Calculate ratio of target class probability to current prediction probability
+                    ratios = np.array([
+                        probs[idx, cls] / probs[idx, final_preds[idx]] 
+                        for idx in sorted_indices
+                    ])
+                    
+                    # Find candidates with good probability ratios
+                    good_candidates = sorted_indices[ratios > prob_ratio_threshold]
+                    
+                    # How many more do we need
+                    needed = min_counts[cls] - current_counts[cls]
+                    # How many can we change without exceeding max modifications
+                    can_change = min(len(good_candidates), needed, max_modifications - modified_count)
+                    
+                    # Convert the best candidates
+                    to_convert = good_candidates[:can_change]
+                    final_preds[to_convert] = cls
+                    can_modify[to_convert] = False  # Mark as processed
+                    modified_count += len(to_convert)
+                    current_counts[cls] += len(to_convert)
+                    
+                    # Update counts of source classes
+                    for idx in to_convert:
+                        current_counts[orig_preds[idx]] -= 1
         
-        # For Confusion and Frustration - very conservative changes
-        elif emotion in ["Confusion", "Frustration"]:
-            # Only make minimal adjustments to add representation for classes 2 and 3
-            for cls in [2, 3]:
-                min_count = max(int(len(probs) * 0.005), 2)  # At least 0.5% or 2 samples
-                if current_counts[cls] < min_count and modified_count < max_modifications:
-                    cls_probs = probs[:, cls]
-                    candidates = np.where((final_preds != cls) & (cls_probs > 0.3) & can_modify)[0]
+        # SECOND STEP: Only if we have room for more changes, try to match target distribution
+        if modified_count < max_modifications and not preserve_accuracy:
+            target_dist = target_dists[emotion]
+            target_counts = np.array([int(len(probs) * p) for p in target_dist])
+            
+            # Fix total count to match exactly
+            diff = len(probs) - sum(target_counts)
+            if diff != 0:
+                # Add/subtract from largest class
+                largest_idx = np.argmax(target_counts)
+                target_counts[largest_idx] += diff
+            
+            # For each class, try to match target count
+            for cls in range(4):
+                diff = target_counts[cls] - current_counts[cls]
+                
+                if diff > 0 and modified_count < max_modifications:
+                    # We need MORE of this class
+                    candidates = np.where(can_modify & (final_preds != cls))[0]
                     if len(candidates) > 0:
-                        sorted_indices = candidates[np.argsort(-cls_probs[candidates])]
-                        num_to_change = min(min_count - current_counts[cls], len(sorted_indices), max_modifications - modified_count)
-                        change_indices = sorted_indices[:num_to_change]
-                        final_preds[change_indices] = cls
-                        modified_count += num_to_change
-        
+                        # Sort by probability of being this class
+                        cls_probs = probs[candidates, cls]
+                        sorted_candidates = candidates[np.argsort(-cls_probs)]
+                        
+                        # Calculate probability ratios
+                        ratios = np.array([
+                            probs[idx, cls] / probs[idx, final_preds[idx]] 
+                            for idx in sorted_candidates
+                        ])
+                        good_candidates = sorted_candidates[ratios > prob_ratio_threshold]
+                        
+                        # How many can we change
+                        can_change = min(diff, len(good_candidates), max_modifications - modified_count)
+                        
+                        # Convert the candidates
+                        to_convert = good_candidates[:can_change]
+                        final_preds[to_convert] = cls
+                        modified_count += len(to_convert)
+                        current_counts[cls] += len(to_convert)
+                        can_modify[to_convert] = False
+                        
+                        # Update counts of source classes
+                        for idx in to_convert:
+                            current_counts[orig_preds[idx]] -= 1
         return final_preds
 
 
@@ -959,7 +969,8 @@ class Distiller:
         Evaluate model and optionally apply post-processing
         """
         self.student.eval()
-        results = {emo:{"true":[],"pred":[], "post_pred":[], "probs":[]} for emo in EMOTIONS}
+        results = {emo:{"true":[],"pred":[]} for emo in EMOTIONS}
+        all_probs = {emo:[] for emo in EMOTIONS} if apply_postprocessing else None
         pbar = tqdm(loader, desc=f"[Eval {tag}]")
         
         with torch.no_grad():
@@ -970,25 +981,25 @@ class Distiller:
                 
                 for e_idx, emo in enumerate(EMOTIONS):
                     logits = out[:, e_idx]
-                    probs = F.softmax(logits, dim=1).cpu().numpy()
-                    preds = logits.argmax(dim=1).cpu().numpy()
-                    labs = lbls[:, e_idx].cpu().numpy()
+                    probs = F.softmax(logits, dim=1)
+                    preds = torch.argmax(logits, dim=1)
                     
-                    results[emo]["true"].extend(labs)
-                    results[emo]["pred"].extend(preds)
+                    results[emo]["true"].extend(lbls[:, e_idx].cpu().numpy())
+                    results[emo]["pred"].extend(preds.cpu().numpy())
+                    
                     if apply_postprocessing:
-                        results[emo]["probs"].append(probs)
+                        all_probs[emo].append(probs.cpu().numpy())
         
         # Process metrics for all emotions
         metrics = {}
         for emo in EMOTIONS:
-            true_vals = np.array(results[emo]["true"])
-            pred_vals = np.array(results[emo]["pred"])
+            true_labels = np.array(results[emo]["true"])
+            orig_preds = np.array(results[emo]["pred"])
             
-            # Original accuracy and metrics
-            orig_acc = accuracy_score(true_vals, pred_vals)
-            orig_rep = classification_report(true_vals, pred_vals, output_dict=True)
-            orig_cm = confusion_matrix(true_vals, pred_vals)
+            # Compute original metrics
+            orig_acc = accuracy_score(true_labels, orig_preds)
+            orig_rep = classification_report(true_labels, orig_preds, output_dict=True)
+            orig_cm = confusion_matrix(true_labels, orig_preds)
             
             metrics_entry = {
                 "accuracy": orig_acc,
@@ -999,29 +1010,29 @@ class Distiller:
             # Apply post-processing if requested
             if apply_postprocessing:
                 # Concatenate all batch probabilities
-                all_probs = np.vstack(results[emo]["probs"]) if results[emo]["probs"] else np.array([])
+                all_prob_concat = np.vstack(all_probs[emo])
+                # Apply post-processing
+                post_preds = self.apply_post_processing(all_prob_concat, emo)
                 
-                if len(all_probs) > 0:
-                    # Apply post-processing
-                    post_vals = self.apply_post_processing(all_probs, emo)
-                    
-                    # Compute post-processed metrics
-                    post_acc = accuracy_score(true_vals, post_vals)
-                    post_rep = classification_report(true_vals, post_vals, output_dict=True)
-                    post_cm = confusion_matrix(true_vals, post_vals)
-                    
-                    # Add to metrics
-                    metrics_entry.update({
-                        "post_accuracy": post_acc,
-                        "post_report": post_rep,
-                        "post_confusion_matrix": post_cm.tolist(),
-                        "true_distribution": np.bincount(true_vals, minlength=4).tolist(),
-                        "pred_distribution": np.bincount(pred_vals, minlength=4).tolist(),
-                        "post_distribution": np.bincount(post_vals, minlength=4).tolist()
-                    })
-                    
-                    # Log improvement
-                    log_message(f"[{tag}] {emo} Original: {orig_acc:.4f}, Post-processed: {post_acc:.4f}, Delta: {post_acc-orig_acc:+.4f}")
+                # Compute post-processed metrics
+                post_acc = accuracy_score(true_labels, post_preds)
+                post_rep = classification_report(true_labels, post_preds, output_dict=True)
+                post_cm = confusion_matrix(true_labels, post_preds)
+                
+                metrics_entry.update({
+                    "post_accuracy": post_acc,
+                    "post_report": post_rep,
+                    "post_confusion_matrix": post_cm.tolist()
+                })
+                
+                # Log accuracy and distribution changes
+                orig_dist = np.bincount(orig_preds, minlength=4) / len(orig_preds)
+                post_dist = np.bincount(post_preds, minlength=4) / len(post_preds)
+                true_dist = np.bincount(true_labels, minlength=4) / len(true_labels)
+                
+                log_message(f"[{tag}] {emo} | Acc: {orig_acc:.4f} → {post_acc:.4f} ({post_acc-orig_acc:+.4f})")
+                log_message(f"[{tag}] {emo} | True dist: {np.round(true_dist,3)}")
+                log_message(f"[{tag}] {emo} | Orig dist: {np.round(orig_dist,3)} → Post: {np.round(post_dist,3)}")
             
             metrics[emo] = metrics_entry
         
@@ -1200,4 +1211,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
