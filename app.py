@@ -724,14 +724,19 @@ def get_emotion_color(emotion_class, emotion_name):
 
 def generate_advice(results):
     """Generate educational advice based on emotion detection."""
-    # Handle case where we have no valid results
-    if not results or not any(results.values()):
+    # Simple null check
+    if not results:
+        return "Waiting for webcam data..."
+    
+    # Use a more explicit check for valid data
+    if all(results.get(emotion, 0) == 0 for emotion in EMOTIONS):
         return "Waiting for enough data to provide personalized feedback..."
-        
-    engagement = results["Engagement"]
-    boredom = results["Boredom"]
-    confusion = results["Confusion"]
-    frustration = results["Frustration"]
+    
+    # Extract emotion values with safe defaults
+    engagement = results.get("Engagement", 0)
+    boredom = results.get("Boredom", 0)
+    confusion = results.get("Confusion", 0)
+    frustration = results.get("Frustration", 0)
     
     if engagement <= 1:  # Disengaged or Low Engagement
         if boredom >= 2:  # Bored or Very Bored
@@ -1072,6 +1077,11 @@ async def index_page():
                     # Process frame
                     results = await emotion_app.process_webcam_frame(frame)
                     
+                    # Debug output to identify problems
+                    print(f"Debug: Sending to advice generator: {results}")
+                    advice = generate_advice(results)
+                    print(f"Debug: Generated advice: '{advice}'")
+                    
                     # Update UI with results
                     for emotion in EMOTIONS:
                         value = results[emotion]
@@ -1082,21 +1092,26 @@ async def index_page():
                         emotion_meters[emotion].value = (value + 1) / 4
                         emotion_meters[emotion].props(f'color={color}')
                     
-                    # FIXED: Always generate advice without checking any(results.values())
-                    # This ensures the feedback updates even with the current results format
-                    advice = generate_advice(results)
-                    advice_label.text = advice
-                
+                    # FIXED: Single, reliable approach to update advice
+                    if any(v > 0 for v in results.values()):
+                        # Force a complete UI refresh using a two-step approach
+                        advice_label.text = ""  # Clear first to ensure change is detected
+                        await asyncio.sleep(0.02)  # Small delay to ensure UI cycle
+                        advice_label.text = advice  # Set new text
+                    elif advice_label.text == "Waiting for webcam data...":
+                        # Only update if still showing initial message
+                        advice_label.text = advice
+                    
                     # Update system info
                     emotion_app.update_system_info()
                     cpu_label.text = f'CPU: {emotion_app.system_info["cpu"]}%'
                     gpu_label.text = f'GPU: {emotion_app.system_info["gpu"]}%'
                     processing_label.text = f'Processing: {emotion_app.system_info["processing_rate"]}'
                     
-                    # Correct color conversion
+                    # Process frame for display
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     
-                    # Draw emotion states with improved text rendering
+                    # Draw emotion states
                     y_pos = 30
                     frame_height, frame_width = frame_rgb.shape[:2]
                     
@@ -1104,35 +1119,30 @@ async def index_page():
                         value = results[emotion]
                         label = get_emotion_label(value, emotion)
                         
-                        # Use text descriptions instead of emojis
                         icon_text = {
-                            "Engagement": "TARGET",
-                            "Boredom": "SLEEPY", 
-                            "Confusion": "THINKING",
-                            "Frustration": "ANGRY"
+                            "Engagement": "",
+                            "Boredom": "", 
+                            "Confusion": "",
+                            "Frustration": ""
                         }[emotion]
                         
                         text = f"{icon_text}: {emotion} - {label}"
                         
-                        # Text background with better margins
                         text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
                         cv2.rectangle(frame_rgb, 
                                     (10, y_pos - 15), 
                                     (min(frame_width - 10, 10 + text_size[0] + 10), y_pos + 5),
                                     (240, 240, 240), -1)
                         
-                        # Text with thinner font
                         cv2.putText(frame_rgb, text, (15, y_pos), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
-                        y_pos += 25  # Less space between lines
+                        y_pos += 25
                     
-                    # Convert to high quality JPEG
+                    # Convert to JPEG and update display
                     _, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, 95])
                     img_base64 = base64.b64encode(buffer).decode('utf-8')
-                    
-                    # Update the webcam image with proper contain fit
                     webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;background-color:black;">')
-            
+                
             await asyncio.sleep(1/30)  # Target 30 FPS UI updates
         
     # Start the update loop
