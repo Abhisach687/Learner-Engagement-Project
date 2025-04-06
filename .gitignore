@@ -28,6 +28,7 @@ logs/
 /notebooks/models_class
 /cache/
 /results/
+/ProEnsembleDistillationResults_Full/
 
 # Ignore all PNG images
 *.png
