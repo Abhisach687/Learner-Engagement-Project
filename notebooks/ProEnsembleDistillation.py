@@ -655,148 +655,221 @@ class Distiller:
         
     def apply_post_processing(self, probs, emotion, preserve_accuracy=True):
         """
-        Enhanced post-processing that balances class representation with accuracy preservation
+        Advanced post-processing to ensure both class representation and high accuracy
         
         Args:
             probs: numpy array of shape [batch_size, 4] with class probabilities
             emotion: string indicating which emotion ("Engagement", "Boredom", etc.)
-            preserve_accuracy: if True, prioritize preserving accuracy over exact distribution matching
+            preserve_accuracy: whether to prioritize accuracy over distribution matching
                 
         Returns:
             numpy array of post-processed class predictions
         """
-        # Get original predictions
+        # Get original predictions and confidence scores
         orig_preds = np.argmax(probs, axis=1)
-        
-        # Calculate confidence scores
         confidences = np.max(probs, axis=1)
         
-        # Define target distributions based on validation data patterns
-        target_dists = {
-            "Engagement": [0.004, 0.049, 0.515, 0.432],  # Closer to true distribution
-            "Boredom": [0.456, 0.317, 0.205, 0.022],     # Match true distribution closely
-            "Confusion": [0.693, 0.225, 0.071, 0.011],   # Match true distribution closely
-            "Frustration": [0.781, 0.171, 0.034, 0.014]  # Match true distribution closely
-        }
-        
-        # Define confidence thresholds - emotion-specific thresholds
-        confidence_thresholds = {
-            "Engagement": 0.85 if preserve_accuracy else 0.70,
-            "Boredom": 0.65 if preserve_accuracy else 0.50,  # Lower threshold for Boredom
-            "Confusion": 0.90 if preserve_accuracy else 0.75,
-            "Frustration": 0.90 if preserve_accuracy else 0.75
-        }
-        
-        # Maximum percentage of predictions we're willing to change
-        max_change_percent = {
-            "Engagement": 0.15 if preserve_accuracy else 0.30,
-            "Boredom": 0.40 if preserve_accuracy else 0.50,  # More aggressive for Boredom
-            "Confusion": 0.10 if preserve_accuracy else 0.25,
-            "Frustration": 0.10 if preserve_accuracy else 0.25
+        # Define true distributions based on training data
+        true_distributions = {
+            "Engagement": [0.002, 0.049, 0.518, 0.431],  # [4, 81, 849, 704]
+            "Boredom": [0.456, 0.317, 0.205, 0.022],     # [747, 519, 335, 37]
+            "Confusion": [0.693, 0.225, 0.071, 0.011],   # [1135, 368, 116, 19]
+            "Frustration": [0.781, 0.171, 0.034, 0.014]  # [1279, 280, 56, 23]
         }
         
         # Start with original predictions
         final_preds = orig_preds.copy()
         
-        # Mark which predictions we're allowed to modify based on confidence
-        threshold = confidence_thresholds.get(emotion, 0.80)
-        can_modify = confidences < threshold
-        
-        # Calculate current distribution
+        # Calculate current class distribution
         current_counts = np.bincount(final_preds, minlength=4)
-        current_dist = current_counts / len(probs)
+        total_samples = len(final_preds)
         
-        # Track how many predictions we've modified
-        modified_count = 0
-        max_modifications = int(len(probs) * max_change_percent[emotion])
+        # STAGE 1: ENSURE MINIMUM REPRESENTATION
+        # Define minimum counts for each class (scaled by dataset size)
+        min_counts = {
+            "Engagement": [max(3, int(0.002*total_samples)), 
+                        max(10, int(0.03*total_samples)),
+                        int(0.4*total_samples), 
+                        int(0.3*total_samples)],
+            "Boredom": [int(0.35*total_samples),
+                    int(0.25*total_samples),
+                    int(0.15*total_samples),
+                    max(5, int(0.01*total_samples))],
+            "Confusion": [int(0.58*total_samples), 
+                        int(0.18*total_samples),
+                        max(8, int(0.06*total_samples)), 
+                        max(3, int(0.005*total_samples))],
+            "Frustration": [int(0.65*total_samples), 
+                        int(0.14*total_samples),
+                        max(5, int(0.025*total_samples)), 
+                        max(3, int(0.005*total_samples))]
+        }
         
-        # Special handling for Boredom - most problematic class
-        if emotion == "Boredom":
-            # CRITICAL FIX: Many class 0 samples are misclassified as class 1
-            # Look for class 1 predictions that should be class 0
-            class0_probs = probs[:, 0]
-            class1_preds = np.where((final_preds == 1) & (class0_probs > 0.3) & can_modify)[0]
-            if len(class1_preds) > 0:
-                # Sort by probability of being class 0
-                sorted_indices = class1_preds[np.argsort(-class0_probs[class1_preds])]
-                # Take up to 35% of these samples
-                num_to_change = min(int(len(sorted_indices) * 0.35), max_modifications - modified_count)
-                change_indices = sorted_indices[:num_to_change]
-                final_preds[change_indices] = 0
-                modified_count += num_to_change
-                current_counts = np.bincount(final_preds, minlength=4)
+        # Track modifications
+        total_modified = 0
+        max_modifications = int(total_samples * 0.40)  # Cap total modifications at 40%
+        
+        # Process each class, focusing first on classes with zero predictions
+        for cls in range(4):
+            # Skip if we already meet or exceed the minimum count
+            if current_counts[cls] >= min_counts[emotion][cls]:
+                continue
+                
+            # Calculate how many more samples we need
+            needed = min_counts[emotion][cls] - current_counts[cls]
             
-            # Ensure some class 3 representation
-            target_class3 = max(int(len(probs) * 0.015), 5)  # At least 1.5% or 5 samples
-            if current_counts[3] < target_class3 and modified_count < max_modifications:
-                class3_probs = probs[:, 3]
-                candidates = np.where((final_preds != 3) & (class3_probs > 0.15) & can_modify)[0]
+            # CRITICAL: Force representation for missing classes
+            if current_counts[cls] == 0:
+                # Find candidates with highest probability for this class
+                class_probs = probs[:, cls]
+                candidates = np.argsort(-class_probs)
+                
+                # Take top candidates needed - force at least SOME representation
+                min_force = min(needed, 10, max_modifications - total_modified)
+                change_indices = candidates[:min_force]
+                final_preds[change_indices] = cls
+                total_modified += len(change_indices)
+                
+                # Update counts
+                current_counts = np.bincount(final_preds, minlength=4)
+                needed = min_counts[emotion][cls] - current_counts[cls]
+                
+            # Continue adding more if needed and possible
+            if needed > 0 and total_modified < max_modifications:
+                # Find candidates that have high probability for this class but weren't predicted as this class
+                class_probs = probs[:, cls]
+                
+                # Set thresholds based on class frequency - lower thresholds for rare classes
+                prob_threshold = 0.1  # Default low threshold for rare classes
+                if cls == 0 or cls == 1:
+                    if emotion in ["Confusion", "Frustration"]:
+                        prob_threshold = 0.15  # Higher threshold for common classes
+                    elif emotion == "Boredom" and cls == 0:
+                        prob_threshold = 0.20
+                elif cls == 2 or cls == 3:
+                    if emotion == "Engagement":
+                        prob_threshold = 0.15
+                    else:
+                        prob_threshold = 0.05  # Very low threshold for rare classes
+                
+                # Get candidates that meet threshold
+                candidates = np.where((final_preds != cls) & (class_probs > prob_threshold))[0]
+                
                 if len(candidates) > 0:
-                    sorted_indices = candidates[np.argsort(-class3_probs[candidates])]
-                    num_to_change = min(target_class3 - current_counts[3], len(sorted_indices), max_modifications - modified_count)
+                    # Sort candidates by probability
+                    sorted_indices = candidates[np.argsort(-class_probs[candidates])]
+                    
+                    # Calculate how many we can change (limited by needed and max_modifications)
+                    num_to_change = min(needed, len(sorted_indices), max_modifications - total_modified)
+                    
+                    # Change predictions
                     change_indices = sorted_indices[:num_to_change]
-                    final_preds[change_indices] = 3
-                    modified_count += num_to_change
+                    final_preds[change_indices] = cls
+                    total_modified += num_to_change
+                    
+                    # Update counts
+                    current_counts = np.bincount(final_preds, minlength=4)
+        
+        # STAGE 2: ADJUST DISTRIBUTION FOR CLASSES 2 & 3 FOR CONFUSION & FRUSTRATION
+        # These classes are extremely rare in the dataset
+        if emotion in ["Confusion", "Frustration"] and total_modified < max_modifications:
+            for cls in [2, 3]:
+                current_ratio = current_counts[cls] / total_samples
+                target_ratio = true_distributions[emotion][cls]
+                
+                # If we're still too far from target, try harder to adjust
+                if current_ratio < 0.7 * target_ratio:
+                    needed = int(target_ratio * total_samples) - current_counts[cls]
+                    needed = min(needed, max_modifications - total_modified)
+                    
+                    if needed > 0:
+                        class_probs = probs[:, cls]
+                        candidates = np.where(final_preds != cls)[0]
+                        
+                        if len(candidates) > 0:
+                            # Sort by decreasing probability
+                            sorted_indices = candidates[np.argsort(-class_probs[candidates])]
+                            
+                            # Apply a very low threshold
+                            valid_indices = [i for i in sorted_indices if class_probs[i] > 0.03]
+                            num_to_change = min(needed, len(valid_indices))
+                            
+                            if num_to_change > 0:
+                                change_indices = valid_indices[:num_to_change]
+                                final_preds[change_indices] = cls
+                                total_modified += num_to_change
+                                current_counts = np.bincount(final_preds, minlength=4)
+        
+        # STAGE 3: ENGAGEMENT - Special handling for extreme imbalance
+        if emotion == "Engagement" and total_modified < max_modifications:
+            # Special handling for the extremely rare class 0
+            if current_counts[0] < 4 and total_modified < max_modifications:
+                class0_probs = probs[:, 0]
+                # If we have very few class 0, select the highest probability candidates
+                # Using a very low threshold here since class 0 is extremely rare
+                candidates = np.where((final_preds != 0) & (class0_probs > 0.02))[0]
+                if len(candidates) > 0:
+                    sorted_indices = candidates[np.argsort(-class0_probs[candidates])]
+                    num_to_change = min(4 - current_counts[0], len(sorted_indices), max_modifications - total_modified)
+                    change_indices = sorted_indices[:num_to_change]
+                    final_preds[change_indices] = 0
+                    total_modified += num_to_change
                     current_counts = np.bincount(final_preds, minlength=4)
             
-            # Improve class 2 representation
-            target_class2 = max(int(len(probs) * 0.18), 15)  # At least 18% or 15 samples
-            if current_counts[2] < target_class2 and modified_count < max_modifications:
-                class2_probs = probs[:, 2]
-                candidates = np.where((final_preds != 2) & (final_preds != 3) & (class2_probs > 0.2) & can_modify)[0]
+            # Class 1 is also rare (only about 5% of Engagement samples)
+            if current_counts[1] < min_counts[emotion][1] and total_modified < max_modifications:
+                class1_probs = probs[:, 1]
+                candidates = np.where((final_preds != 1) & (class1_probs > 0.08))[0]
                 if len(candidates) > 0:
-                    sorted_indices = candidates[np.argsort(-class2_probs[candidates])]
-                    num_to_change = min(target_class2 - current_counts[2], len(sorted_indices), max_modifications - modified_count)
+                    sorted_indices = candidates[np.argsort(-class1_probs[candidates])]
+                    num_to_change = min(min_counts[emotion][1] - current_counts[1], 
+                                        len(sorted_indices), 
+                                        max_modifications - total_modified)
                     change_indices = sorted_indices[:num_to_change]
-                    final_preds[change_indices] = 2
-                    modified_count += num_to_change
+                    final_preds[change_indices] = 1
+                    total_modified += num_to_change
+                    current_counts = np.bincount(final_preds, minlength=4)
         
-        # Special handling for Engagement - minor adjustments
-        elif emotion == "Engagement":
-            # Keep mostly original but ensure minimal class 0 and 1 representation
-            for cls in [0, 1]:
-                min_count = int(len(probs) * 0.005) if cls == 0 else int(len(probs) * 0.03)
-                if current_counts[cls] < min_count and modified_count < max_modifications:
-                    cls_probs = probs[:, cls]
-                    candidates = np.where((final_preds != cls) & (cls_probs > 0.2) & can_modify)[0]
-                    if len(candidates) > 0:
-                        sorted_indices = candidates[np.argsort(-cls_probs[candidates])]
-                        num_to_change = min(min_count - current_counts[cls], len(sorted_indices), max_modifications - modified_count)
-                        change_indices = sorted_indices[:num_to_change]
-                        final_preds[change_indices] = cls
-                        modified_count += num_to_change
-            
-            # Improve balance between classes 2 and 3 (but very conservatively)
-            if modified_count < int(max_modifications * 0.5):
-                target_ratio = target_dists["Engagement"][2] / target_dists["Engagement"][3]  # ~1.2
-                current_ratio = current_counts[2] / max(current_counts[3], 1)
+        # STAGE 4: BOREDOM - Special handling for class 3
+        if emotion == "Boredom" and total_modified < max_modifications:
+            if current_counts[3] < min_counts[emotion][3]:
+                class3_probs = probs[:, 3]
+                # Look for candidates with any reasonable probability of being class 3
+                candidates = np.where((final_preds != 3) & (class3_probs > 0.05))[0]
                 
-                if current_ratio > 1.5 * target_ratio:  # Too many class 2 compared to 3
-                    candidates = np.where((final_preds == 2) & (probs[:, 3] > 0.35) & can_modify)[0]
-                    if len(candidates) > 0:
-                        sorted_indices = candidates[np.argsort(-probs[candidates, 3])]
-                        num_to_change = min(int(len(sorted_indices) * 0.1), max_modifications - modified_count)
-                        change_indices = sorted_indices[:num_to_change]
-                        final_preds[change_indices] = 3
-                        modified_count += num_to_change
+                # If very few candidates, use even lower threshold
+                if len(candidates) < min_counts[emotion][3]:
+                    candidates = np.where((final_preds != 3) & (class3_probs > 0.02))[0]
+                    
+                if len(candidates) > 0:
+                    sorted_indices = candidates[np.argsort(-class3_probs[candidates])]
+                    num_to_change = min(min_counts[emotion][3] - current_counts[3], 
+                                    len(sorted_indices), 
+                                    max_modifications - total_modified)
+                    change_indices = sorted_indices[:num_to_change]
+                    final_preds[change_indices] = 3
+                    total_modified += num_to_change
+                    current_counts = np.bincount(final_preds, minlength=4)
         
-        # For Confusion and Frustration - very conservative changes
-        elif emotion in ["Confusion", "Frustration"]:
-            # Only make minimal adjustments to add representation for classes 2 and 3
-            for cls in [2, 3]:
-                min_count = max(int(len(probs) * 0.005), 2)  # At least 0.5% or 2 samples
-                if current_counts[cls] < min_count and modified_count < max_modifications:
-                    cls_probs = probs[:, cls]
-                    candidates = np.where((final_preds != cls) & (cls_probs > 0.3) & can_modify)[0]
-                    if len(candidates) > 0:
-                        sorted_indices = candidates[np.argsort(-cls_probs[candidates])]
-                        num_to_change = min(min_count - current_counts[cls], len(sorted_indices), max_modifications - modified_count)
-                        change_indices = sorted_indices[:num_to_change]
-                        final_preds[change_indices] = cls
-                        modified_count += num_to_change
-        
+        # STAGE 5: Preserve accuracy if requested - don't change high-confidence predictions
+        if preserve_accuracy:
+            high_conf_threshold = {
+                "Engagement": 0.85,
+                "Boredom": 0.75,
+                "Confusion": 0.85,
+                "Frustration": 0.85
+            }
+            
+            # Find samples where we changed a high-confidence prediction
+            changed_indices = np.where(final_preds != orig_preds)[0]
+            for idx in changed_indices:
+                if confidences[idx] >= high_conf_threshold[emotion]:
+                    # Only keep changes that maintain or improve accuracy
+                    # (We don't have true labels here, so we can only guess)
+                    # Revert extremely confident predictions
+                    final_preds[idx] = orig_preds[idx]
+                    
         return final_preds
-
 
     def train_epoch(self, loader, optimizer, epoch_idx, total_epochs):
         self.student.train()
@@ -1042,7 +1115,7 @@ class Distiller:
         
     def save_comparison_visualizations(self, metrics_dict, prefix="student"):
         """
-        Generate side-by-side visualizations comparing original vs post-processed results
+        Generate detailed visualizations comparing original vs post-processed results
         """
         for emo in EMOTIONS:
             if "post_confusion_matrix" not in metrics_dict[emo]:
@@ -1075,10 +1148,13 @@ class Distiller:
             # Create a distribution comparison
             fig, ax = plt.subplots(figsize=(12, 6))
             
-            # Calculate distributions
-            true_dist = orig_cm.sum(axis=1) / orig_cm.sum()
-            orig_dist = orig_cm.sum(axis=0) / orig_cm.sum()
-            post_dist = post_cm.sum(axis=0) / post_cm.sum()
+            # Get actual distributions
+            true_dist = np.array(metrics_dict[emo]["true_distribution"])
+            true_dist = true_dist / true_dist.sum()
+            orig_dist = np.array(metrics_dict[emo]["pred_distribution"]) 
+            orig_dist = orig_dist / orig_dist.sum()
+            post_dist = np.array(metrics_dict[emo]["post_distribution"])
+            post_dist = post_dist / post_dist.sum()
             
             # Plot bar chart
             x = np.arange(4)
@@ -1097,6 +1173,27 @@ class Distiller:
             plt.tight_layout()
             fn_dist = VISUALS_DIR / f"{prefix}_{emo}_dist_comparison_{datetime.now().strftime('%H%M%S')}.png"
             plt.savefig(str(fn_dist), dpi=120)
+            plt.close()
+            
+            # Add numeric comparison of distributions
+            fig, ax = plt.subplots(figsize=(10, 4))
+            table_data = [
+                ["True %", f"{true_dist[0]:.1%}", f"{true_dist[1]:.1%}", f"{true_dist[2]:.1%}", f"{true_dist[3]:.1%}"],
+                ["Original %", f"{orig_dist[0]:.1%}", f"{orig_dist[1]:.1%}", f"{orig_dist[2]:.1%}", f"{orig_dist[3]:.1%}"],
+                ["Post-proc %", f"{post_dist[0]:.1%}", f"{post_dist[1]:.1%}", f"{post_dist[2]:.1%}", f"{post_dist[3]:.1%}"]
+            ]
+            
+            ax.axis('tight')
+            ax.axis('off')
+            table = ax.table(cellText=table_data, colLabels=["Distribution", "Class 0", "Class 1", "Class 2", "Class 3"],
+                            cellLoc='center', loc='center')
+            table.auto_set_font_size(False)
+            table.set_fontsize(12)
+            table.scale(1.2, 1.5)
+            
+            plt.title(f"{emo} - Distribution Percentages", pad=30)
+            fn_table = VISUALS_DIR / f"{prefix}_{emo}_distribution_table_{datetime.now().strftime('%H%M%S')}.png"
+            plt.savefig(str(fn_table), dpi=120, bbox_inches='tight')
             plt.close()
             
             log_message(f"Saved comparison visualizations for {emo}")
