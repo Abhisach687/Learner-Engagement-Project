@@ -769,6 +769,7 @@ class EmotionDetectionApp:
         self.frame_count = 0
         self.frame_buffer = []
         self.webcam = None
+        self.prev_advice = ""
         self.webcam_active = False
         self.processing_active = False
         self.last_results = {emo: 0 for emo in EMOTIONS}
@@ -1138,7 +1139,12 @@ async def index_page():
                     
 
                     with advice_container:
-                        ui.run_javascript(f"document.getElementById('advice_label').innerText = {json.dumps(advice)};")
+                        if advice != emotion_app.prev_advice:
+                            try:
+                                ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice)};")
+                                emotion_app.prev_advice = advice
+                            except Exception as err:
+                                print("JS update error:", err)
 
                     # Update system info
                     emotion_app.update_system_info()
@@ -1186,4 +1192,4 @@ async def index_page():
     # Start the update loop
     asyncio.create_task(update_webcam_frame())
 
-ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080)
+ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080, reload=False)
