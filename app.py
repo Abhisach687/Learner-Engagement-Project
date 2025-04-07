@@ -66,6 +66,8 @@ thread_pool = ThreadPoolExecutor(max_workers=psutil.cpu_count(logical=False) - 1
 PREDICTION_QUEUE = queue.Queue(maxsize=5)
 RESULTS_BUFFER = deque(maxlen=SMOOTHING_WINDOW)
 
+advice_text = "Waiting for webcam data..."
+
 # -------------------------------------------------------------------------
 #                      STUDENT MODEL DEFINITION
 # -------------------------------------------------------------------------
@@ -1051,10 +1053,10 @@ async def index_page():
         
         # Advice row
         with ui.row().classes('w-full'):
-            with ui.column().classes('advice-container col-12'):
+            with ui.column().classes('advice-container col-12') as advice_container:
                 ui.label('Learning Feedback').classes('text-h6')
-                advice_label = ui.label('Waiting for webcam data...').classes('text-body1 q-mt-md')
-        
+                advice_label = ui.label('Waiting for webcam data...').classes('text-body1 q-mt-md').props("id=advice_label")
+
         # System info row
         with ui.row().classes('w-full'):
             with ui.column().classes('system-info col-12'):
@@ -1082,7 +1084,7 @@ async def index_page():
                     advice = generate_advice(results)
                     print(f"Debug: Generated advice: '{advice}'")
                     
-                    # Update UI with results
+                    # Update UI with results for each emotion
                     for emotion in EMOTIONS:
                         value = results[emotion]
                         label = get_emotion_label(value, emotion)
@@ -1092,16 +1094,10 @@ async def index_page():
                         emotion_meters[emotion].value = (value + 1) / 4
                         emotion_meters[emotion].props(f'color={color}')
                     
-                    # FIXED: Single, reliable approach to update advice
-                    if any(v > 0 for v in results.values()):
-                        # Force a complete UI refresh using a two-step approach
-                        advice_label.text = ""  # Clear first to ensure change is detected
-                        await asyncio.sleep(0.02)  # Small delay to ensure UI cycle
-                        advice_label.text = advice  # Set new text
-                    elif advice_label.text == "Waiting for webcam data...":
-                        # Only update if still showing initial message
-                        advice_label.text = advice
-                    
+
+                    with advice_container:
+                        ui.run_javascript(f"document.getElementById('advice_label').innerText = {json.dumps(advice)};")
+
                     # Update system info
                     emotion_app.update_system_info()
                     cpu_label.text = f'CPU: {emotion_app.system_info["cpu"]}%'
