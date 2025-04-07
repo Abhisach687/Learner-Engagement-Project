@@ -696,7 +696,7 @@ async def process_frame(frame, frame_count, frame_buffer, models):
             final_results[emotion] = smooth_pred
     
     # Debug output to see what values are being produced
-    print(f"Final results: {final_results}")
+    # print(f"Final results: {final_results}")
     
     return final_results
 
@@ -916,6 +916,7 @@ class EmotionDetectionApp:
 # Initialize app
 emotion_app = EmotionDetectionApp()
 
+
 @ui.page('/')
 async def index_page():
     # Page setup
@@ -925,6 +926,36 @@ async def index_page():
                 background-color: #f7f9fc;
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             }
+            [data-theme="dark"] body {
+                background-color: #1e1e1e;
+                color: #fff;
+            }
+            [data-theme="dark"] .card,
+            [data-theme="dark"] .webcam-container,
+            [data-theme="dark"] .advice-container,
+            [data-theme="dark"] .system-info {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+            }
+            [data-theme="dark"] .button-primary {
+                background-color: #bb86fc !important;
+                color: #121212 !important;
+            }
+
+            [data-theme="dark"] .button-secondary {
+                background-color: #03dac6 !important;
+                color: #121212 !important;
+            }
+            [data-theme="dark"] .card .text-h6,
+            [data-theme="dark"] .card .text-body1 {
+                color: #121212 !important;
+            }
+            [data-theme="dark"] .emotion-card > div {
+                color: #121212 !important;
+            }
+            
+
             .container {
                 max-width: 1200px;
                 margin: 0 auto;
@@ -1035,6 +1066,17 @@ async def index_page():
                         .classes('button-primary')
                     ui.button('Stop Webcam', on_click=emotion_app.stop_webcam) \
                         .classes('button-secondary')
+                    # Define the toggle function
+                    def toggle_dark_mode():
+                        ui.dark_mode = not ui.dark_mode
+                        mode = "dark" if ui.dark_mode else "light"
+                        ui.run_javascript(f"document.documentElement.setAttribute('data-theme', '{mode}');")
+                        print("Dark mode:" if ui.dark_mode else "Light mode:")
+
+                    # Create the toggle button (placed outside the function)
+                    ui.button("Toggle Dark/Light Mode", on_click=toggle_dark_mode).classes("button-secondary")
+
+        
             
             # Emotions display
             with ui.column().classes('col-12 col-md-4 q-pl-md-lg'):
@@ -1080,9 +1122,9 @@ async def index_page():
                     results = await emotion_app.process_webcam_frame(frame)
                     
                     # Debug output to identify problems
-                    print(f"Debug: Sending to advice generator: {results}")
+                    # print(f"Debug: Sending to advice generator: {results}")
                     advice = generate_advice(results)
-                    print(f"Debug: Generated advice: '{advice}'")
+                    # print(f"Debug: Generated advice: '{advice}'")
                     
                     # Update UI with results for each emotion
                     for emotion in EMOTIONS:
