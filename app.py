@@ -1016,7 +1016,7 @@ async def index_page():
     
     # Main layout
     with ui.column().classes('container'):
-        ui.label('AI-Powered Learning Engagement Monitor').classes('text-h4 text-weight-bold')
+        ui.label('Learning Engagement Monitor').classes('text-h4 text-weight-bold')
         ui.label('Real-time emotional state detection for optimized learning').classes('text-subtitle2 q-mb-md')
         
         # Webcam row
@@ -1120,10 +1120,10 @@ async def index_page():
                         label = get_emotion_label(value, emotion)
                         
                         icon_text = {
-                            "Engagement": "",
-                            "Boredom": "", 
-                            "Confusion": "",
-                            "Frustration": ""
+                            "Engagement": "1",
+                            "Boredom": "2", 
+                            "Confusion": "3",
+                            "Frustration": "4"
                         }[emotion]
                         
                         text = f"{icon_text}: {emotion} - {label}"
