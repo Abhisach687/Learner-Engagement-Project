@@ -29,6 +29,7 @@ logs/
 /cache/
 /results/
 /ProEnsembleDistillationResults_Full/
+/fusion_benchmark_20250408_130136/
 
 # Ignore all PNG images
 *.png

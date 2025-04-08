@@ -1,4 +1,23 @@
 
+Fusion Approach in app.py
+In app.py, a selective fusion approach is used:
+
+Two base models are employed:
+
+ProEnsembleDistillation: A temporal neural model that processes frame sequences
+XGBoost with HOG features: A traditional ML approach with handcrafted features
+The fusion strategy uses:
+
+Confidence thresholding: If ProEnsemble confidence > 0.35, use that prediction directly
+Model selection by emotion: Use different models for different emotions
+For Engagement: Use ProEnsembleDistillation
+For Boredom, Confusion, Frustration: Use XGBoost
+Temporal smoothing: Applying weighted smoothing to predictions over time
+This is a hybrid selective fusion that leverages the strengths of each model for specific emotions.
+
+
+
+
 1. XGBOOST_HOG.ipynb metrics
 
 ==================================================
