@@ -550,11 +550,31 @@ async def run_xgboost(hog_feature, xgb_models):
         return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
 
 def select_final_prediction(pro_ensemble_result, xgboost_result, emotion):
-    """Select the best model for each emotion based on benchmark performance."""
-    if emotion == "Boredom" or emotion == "Confusion" or emotion == "Frustration":
-        return xgboost_result  # XGBOOST_HOG outperforms in these emotions
-    else:  # emotion == "Engagement"
-        return pro_ensemble_result  # ProEnsembleDistillation slightly better here
+    """Apply weighted fusion between models based on predefined weights."""
+    # Define weights per emotion
+    weights = {
+        "Engagement": [0.6, 0.4],    # [ProEnsemble, XGBOOST_HOG]
+        "Boredom": [0.3, 0.7],
+        "Confusion": [0.3, 0.7],
+        "Frustration": [0.3, 0.7]
+    }
+    
+    # Get weights for this emotion
+    w1 = weights[emotion][0]
+    w2 = weights[emotion][1]
+    
+    # Convert class predictions to one-hot encoded form
+    pro_probs = np.zeros(4)
+    pro_probs[pro_ensemble_result] = 1.0
+    
+    xgb_probs = np.zeros(4)
+    xgb_probs[xgboost_result] = 1.0
+    
+    # Apply weighted fusion
+    combined_probs = w1 * pro_probs + w2 * xgb_probs
+    
+    # Return the class with highest weighted probability
+    return np.argmax(combined_probs)
 
 def apply_temporal_smoothing(current_pred, emotion):
     """Apply temporal smoothing to predictions for stability."""
