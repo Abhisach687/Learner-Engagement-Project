@@ -745,7 +745,7 @@ def get_emotion_color(emotion_class, emotion_name):
     return colors[emotion_name][emotion_class]
 
 def generate_advice(results):
-    """Generate educational advice based on emotion detection."""
+    """Generate educational advice based on emotion detection with explanations."""
     # Simple null check
     if not results:
         return "Waiting for webcam data..."
@@ -760,26 +760,51 @@ def generate_advice(results):
     confusion = results.get("Confusion", 0)
     frustration = results.get("Frustration", 0)
     
+    # Create explanation of the reasoning behind advice
+    explanation = "Based on: "
+    explanations = []
+    
+    if engagement <= 1:
+        explanations.append(f"low engagement level ({get_emotion_label(engagement, 'Engagement')})")
+    else:
+        explanations.append(f"good engagement level ({get_emotion_label(engagement, 'Engagement')})")
+    
+    if boredom >= 2:
+        explanations.append(f"elevated boredom ({get_emotion_label(boredom, 'Boredom')})")
+    
+    if confusion >= 2:
+        explanations.append(f"noticeable confusion ({get_emotion_label(confusion, 'Confusion')})")
+        
+    if frustration >= 2:
+        explanations.append(f"visible frustration ({get_emotion_label(frustration, 'Frustration')})")
+    
+    explanation += ", ".join(explanations)
+    
+    # Original advice logic
+    advice = ""
     if engagement <= 1:  # Disengaged or Low Engagement
         if boredom >= 2:  # Bored or Very Bored
-            return "You seem disengaged. Try taking a short break or switching to a more interactive section."
+            advice = "You seem disengaged. Try taking a short break or switching to a more interactive section."
         if confusion >= 2:  # Confused or Very Confused
-            return "You appear to be struggling with this material. Consider reviewing the prerequisites or asking for help."
+            advice = "You appear to be struggling with this material. Consider reviewing the prerequisites or asking for help."
         if frustration >= 2:  # Frustrated or Very Frustrated
-            return "You seem frustrated. Take a moment to relax and break the problem into smaller steps."
-        return "Try to engage more actively with the material by taking notes or working through examples."
+            advice = "You seem frustrated. Take a moment to relax and break the problem into smaller steps."
+        advice = advice or "Try to engage more actively with the material by taking notes or working through examples."
         
     elif confusion >= 2:  # Engaged but Confused
-        return "You're engaged but seem confused. Don't hesitate to ask questions or review previous sections."
+        advice = "You're engaged but seem confused. Don't hesitate to ask questions or review previous sections."
         
     elif frustration >= 2:  # Engaged but Frustrated
-        return "You're working hard but seem frustrated. Consider a different approach or ask for assistance."
+        advice = "You're working hard but seem frustrated. Consider a different approach or ask for assistance."
         
     elif boredom >= 2:  # Engaged but Bored
-        return "You're attentive but might benefit from more challenging material or interactive exercises."
+        advice = "You're attentive but might benefit from more challenging material or interactive exercises."
         
     else:  # Fully engaged, not bored, confused or frustrated
-        return "You're demonstrating excellent engagement! Keep up the good work."
+        advice = "You're demonstrating excellent engagement! Keep up the good work."
+    
+    # Combine advice and explanation
+    return f"{advice}\n\n{explanation}"
 
 # -------------------------------------------------------------------------
 #                      MAIN APPLICATION
@@ -1119,6 +1144,7 @@ async def index_page():
             with ui.column().classes('advice-container col-12') as advice_container:
                 ui.label('Learning Feedback').classes('text-h6')
                 advice_label = ui.label('Waiting for webcam data...').classes('text-body1 q-mt-md').props("id=advice_label")
+                explanation_label = ui.label('').classes('text-body2 q-mt-sm text-grey-7').props("id=explanation_label")
 
         # System info row
         with ui.row().classes('w-full'):
@@ -1161,7 +1187,14 @@ async def index_page():
                     with advice_container:
                         if advice != emotion_app.prev_advice:
                             try:
-                                ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice)};")
+                                # Split advice and explanation
+                                if "\n\n" in advice:
+                                    advice_text, explanation_text = advice.split("\n\n", 1)
+                                    ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice_text)};")
+                                    ui.run_javascript(f"var el = document.getElementById('explanation_label'); if(el) el.innerText = {json.dumps(explanation_text)};")
+                                else:
+                                    ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice)};")
+                                    ui.run_javascript(f"var el = document.getElementById('explanation_label'); if(el) el.innerText = '';")
                                 emotion_app.prev_advice = advice
                             except Exception as err:
                                 print("JS update error:", err)
