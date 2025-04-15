@@ -17,10 +17,10 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 
 # Import from your main script
 from ProEnsembleDistillation import (
-    MobileNetV2LSTMStudent, DAiSEERawDataset, Distiller,
+    MobileNetV2LSTMStudent, DAiSEERawDataset, Distiller, DAiSEEEnsemble,  # Added DAiSEEEnsemble
     EMOTIONS, DEVICE, DISTILL_MODELS_DIR, METRICS_DIR, VISUALS_DIR, LOG_FILE,
-    LOG_DIR, CACHE_DIR, FRAMES_DIR, LABELS_DIR,
-    T, log_message, clear_gpu_memory
+    LOG_DIR, CACHE_DIR, FRAMES_DIR, LABELS_DIR, MODEL_DIR,  # Added MODEL_DIR
+    T, log_message, clear_gpu_memory, save_confusion_matrices  # Added save_confusion_matrices
 )
 
 def main():
@@ -67,6 +67,11 @@ def main():
         json.dump(original_metrics, f, indent=2)
     log_message(f"Saved original metrics => {orig_mj}")
     
+    # Initialize and load ensemble
+    log_message("Loading ensemble models...")
+    ensemble = DAiSEEEnsemble()
+    ensemble.load_all()
+    
     # Evaluate with post-processing
     log_message("\n=== Evaluating with post-processing ===")
     post_metrics = distiller.evaluate(test_loader, "Test", apply_postprocessing=True)
@@ -89,6 +94,37 @@ def main():
     # Clean up
     clear_gpu_memory()
     log_message("==== Post-Processing Evaluation Complete ====")
+        
+    # Evaluate ensemble (before post-processing)
+    log_message("\n=== Evaluating ensemble (original predictions) ===")
+    ensemble_metrics = ensemble.evaluate(test_loader, "Ensemble", apply_postprocessing=False)
+    ensemble_mj = METRICS_DIR / f"ensemble_original_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(ensemble_mj, "w") as f:
+        json.dump(ensemble_metrics, f, indent=2)
+    log_message(f"Saved ensemble metrics => {ensemble_mj}")
+    save_confusion_matrices(ensemble_metrics, "ensemble_original")
+
+    # Evaluate ensemble (with post-processing)
+    log_message("\n=== Evaluating ensemble (with post-processing) ===")
+    ensemble_post_metrics = ensemble.evaluate(test_loader, "Ensemble", apply_postprocessing=True)
+    ensemble_post_mj = METRICS_DIR / f"ensemble_postprocessed_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(ensemble_post_mj, "w") as f:
+        json.dump(ensemble_post_metrics, f, indent=2)
+    log_message(f"Saved post-processed ensemble metrics => {ensemble_post_mj}")
+
+    # Generate comparison visualizations
+    distiller.save_comparison_visualizations(ensemble_post_metrics, "ensemble")
+
+    # Print summary comparing ensemble and student
+    log_message("\n=== Performance Comparison Summary ===")
+    for emo in EMOTIONS:
+        ens_acc = ensemble_metrics[emo]["accuracy"]
+        ens_post_acc = ensemble_post_metrics[emo]["post_accuracy"]
+        stu_acc = original_metrics[emo]["accuracy"]
+        stu_post_acc = post_metrics[emo]["post_accuracy"]
+        
+        log_message(f"{emo}: Ensemble {ens_acc:.4f}/{ens_post_acc:.4f} vs Student {stu_acc:.4f}/{stu_post_acc:.4f}")
+    
 
 if __name__ == "__main__":
     main()

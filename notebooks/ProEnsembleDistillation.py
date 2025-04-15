@@ -634,7 +634,82 @@ class DAiSEEEnsemble:
                 xgb_batch_probs[i, e_idx, pred_class] = 1.0
         
         return xgb_batch_probs
-    
+
+    def evaluate(self, loader, tag="Ensemble", apply_postprocessing=True):
+        """
+        Evaluate the ensemble model and optionally apply post-processing
+        """
+        self.load_all()  # Ensure models are loaded
+        results = {emo: {"true": [], "pred": [], "post_pred": [], "probs": []} for emo in EMOTIONS}
+        
+        pbar = tqdm(loader, desc=f"[Eval {tag}]")
+        for frames, lbls in pbar:
+            frames = frames.to(DEVICE)
+            lbls = lbls.to(DEVICE)
+            
+            # Get ensemble predictions
+            with torch.no_grad(), autocast(device_type='cuda'):
+                probs = self.extract_ensemble_probabilities(frames)
+                
+            # Store results for each emotion
+            for e_idx, emo in enumerate(EMOTIONS):
+                logits = probs[:, e_idx]
+                preds = logits.argmax(dim=1).cpu().numpy()
+                labs = lbls[:, e_idx].cpu().numpy()
+                
+                results[emo]["true"].extend(labs)
+                results[emo]["pred"].extend(preds)
+                if apply_postprocessing:
+                    results[emo]["probs"].append(logits.cpu().numpy())
+        
+        # Process metrics for all emotions
+        metrics = {}
+        for emo in EMOTIONS:
+            true_vals = np.array(results[emo]["true"])
+            pred_vals = np.array(results[emo]["pred"])
+            
+            # Original accuracy and metrics
+            orig_acc = accuracy_score(true_vals, pred_vals)
+            orig_rep = classification_report(true_vals, pred_vals, output_dict=True)
+            orig_cm = confusion_matrix(true_vals, pred_vals)
+            
+            metrics_entry = {
+                "accuracy": orig_acc,
+                "report": orig_rep,
+                "confusion_matrix": orig_cm.tolist()
+            }
+            
+            # Apply post-processing if requested
+            if apply_postprocessing:
+                # Concatenate all batch probabilities
+                all_probs = np.vstack(results[emo]["probs"]) if results[emo]["probs"] else np.array([])
+                
+                if len(all_probs) > 0:
+                    # Create temporary distiller for post-processing
+                    temp_distiller = Distiller(None, None)
+                    post_vals = temp_distiller.apply_post_processing(all_probs, emo)
+                    
+                    # Compute post-processed metrics
+                    post_acc = accuracy_score(true_vals, post_vals)
+                    post_rep = classification_report(true_vals, post_vals, output_dict=True)
+                    post_cm = confusion_matrix(true_vals, post_vals)
+                    
+                    # Add to metrics
+                    metrics_entry.update({
+                        "post_accuracy": post_acc,
+                        "post_report": post_rep,
+                        "post_confusion_matrix": post_cm.tolist(),
+                        "true_distribution": np.bincount(true_vals, minlength=4).tolist(),
+                        "pred_distribution": np.bincount(pred_vals, minlength=4).tolist(),
+                        "post_distribution": np.bincount(post_vals, minlength=4).tolist()
+                    })
+                    
+                    # Log improvement
+                    log_message(f"[{tag}] {emo} Original: {orig_acc:.4f}, Post-processed: {post_acc:.4f}, Delta: {post_acc-orig_acc:+.4f}")
+            
+            metrics[emo] = metrics_entry
+        
+        return metrics
 
 # -------------------------------------------------------------------------
 #                  DISTILLER
@@ -1026,31 +1101,32 @@ class Distiller:
                 "val_loss": val_loss
             }, checkpoint_path)
             
-
-    def evaluate(self, loader, tag="Test", apply_postprocessing=True):
+    def evaluate(self, loader, tag="Student", apply_postprocessing=True):
         """
-        Evaluate model and optionally apply post-processing
+        Evaluate the student model and optionally apply post-processing
         """
         self.student.eval()
-        results = {emo:{"true":[],"pred":[], "post_pred":[], "probs":[]} for emo in EMOTIONS}
-        pbar = tqdm(loader, desc=f"[Eval {tag}]")
+        results = {emo: {"true": [], "pred": [], "post_pred": [], "probs": []} for emo in EMOTIONS}
         
-        with torch.no_grad():
-            for frames, lbls in pbar:
-                frames = frames.to(DEVICE)
-                lbls = lbls.to(DEVICE)
+        pbar = tqdm(loader, desc=f"[Eval {tag}]")
+        for frames, lbls in pbar:
+            frames = frames.to(DEVICE)
+            lbls = lbls.to(DEVICE)
+            
+            # Get student predictions
+            with torch.no_grad(), autocast(device_type='cuda'):
                 out = self.student(frames)
                 
-                for e_idx, emo in enumerate(EMOTIONS):
-                    logits = out[:, e_idx]
-                    probs = F.softmax(logits, dim=1).cpu().numpy()
-                    preds = logits.argmax(dim=1).cpu().numpy()
-                    labs = lbls[:, e_idx].cpu().numpy()
-                    
-                    results[emo]["true"].extend(labs)
-                    results[emo]["pred"].extend(preds)
-                    if apply_postprocessing:
-                        results[emo]["probs"].append(probs)
+            # Store results for each emotion
+            for e_idx, emo in enumerate(EMOTIONS):
+                logits = out[:, e_idx]
+                preds = logits.argmax(dim=1).cpu().numpy()
+                labs = lbls[:, e_idx].cpu().numpy()
+                
+                results[emo]["true"].extend(labs)
+                results[emo]["pred"].extend(preds)
+                if apply_postprocessing:
+                    results[emo]["probs"].append(F.softmax(logits, dim=1).cpu().numpy())
         
         # Process metrics for all emotions
         metrics = {}
@@ -1099,7 +1175,7 @@ class Distiller:
             metrics[emo] = metrics_entry
         
         return metrics
-    
+
     def save_plots(self):
         plt.figure()
         plt.plot(self.train_losses, label="Train")
