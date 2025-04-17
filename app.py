@@ -38,6 +38,22 @@ EMOTION_ICONS = {
     "Frustration": "😠"
 }
 
+# Emotion-specific confidence gates based on benchmark analysis
+EMOTION_GATES = {
+    "Engagement": 0.10,
+    "Boredom": 0.45,
+    "Confusion": 0.10,
+    "Frustration": 0.10
+}
+
+# Fusion strategies for each emotion
+FUSION_STRATEGIES = {
+    "Engagement": "mobilenet_only",  # Use MobileNet predictions unless confidence extremely low
+    "Boredom": "gated_blend",        # Blend probabilities when MobileNet confidence below threshold
+    "Confusion": "gated_weighted",    # Use weighted fusion for Confusion if MobileNet confidence low
+    "Frustration": "gated_switch"     # Hard switch to XGBoost for very low confidence predictions
+}
+
 # Set CUDA device if available
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEVICE_INFO = f"Using {DEVICE} for inference"
@@ -549,32 +565,60 @@ async def run_xgboost(hog_feature, xgb_models):
         print(f"Error in XGBoost inference: {e}")
         return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
 
-def select_final_prediction(pro_ensemble_result, xgboost_result, emotion):
-    """Apply weighted fusion between models based on predefined weights."""
-    # Define weights per emotion
-    weights = {
-        "Engagement": [0.6, 0.4],    # [ProEnsemble, XGBOOST_HOG]
-        "Boredom": [0.3, 0.7],
-        "Confusion": [0.3, 0.7],
-        "Frustration": [0.3, 0.7]
-    }
+def select_final_prediction(mobilenet_probs, xgboost_probs, emotion):
+    """
+    Apply emotion-specific fusion strategies based on benchmark analysis.
     
-    # Get weights for this emotion
-    w1 = weights[emotion][0]
-    w2 = weights[emotion][1]
+    Args:
+        mobilenet_probs: Probability distribution from MobileNet model
+        xgboost_probs: Probability distribution from XGBoost model
+        emotion: Emotion type being processed
     
-    # Convert class predictions to one-hot encoded form
-    pro_probs = np.zeros(4)
-    pro_probs[pro_ensemble_result] = 1.0
+    Returns:
+        Predicted class after fusion
+    """
+    # Get maximum probability and its class from MobileNet
+    mobilenet_conf = np.max(mobilenet_probs)
+    mobilenet_class = np.argmax(mobilenet_probs)
     
-    xgb_probs = np.zeros(4)
-    xgb_probs[xgboost_result] = 1.0
+    # Get maximum probability and its class from XGBoost
+    xgboost_conf = np.max(xgboost_probs)
+    xgboost_class = np.argmax(xgboost_probs)
     
-    # Apply weighted fusion
-    combined_probs = w1 * pro_probs + w2 * xgb_probs
+    # Get the confidence gate for this emotion
+    gate = EMOTION_GATES[emotion]
     
-    # Return the class with highest weighted probability
-    return np.argmax(combined_probs)
+    # Get the fusion strategy for this emotion
+    strategy = FUSION_STRATEGIES[emotion]
+    
+    # Apply the appropriate fusion strategy
+    if mobilenet_conf >= gate:
+        # If MobileNet confidence is above gate, use its prediction
+        return mobilenet_class
+    else:
+        # Apply emotion-specific fusion strategy
+        if strategy == "mobilenet_only":
+            # For "mobilenet_only", still use MobileNet even below gate
+            # (gate is already very low for this strategy)
+            return mobilenet_class
+            
+        elif strategy == "gated_blend":
+            # For "gated_blend", blend probabilities with 60% MobileNet, 40% XGBoost
+            blended_probs = 0.6 * mobilenet_probs + 0.4 * xgboost_probs
+            return np.argmax(blended_probs)
+            
+        elif strategy == "gated_weighted":
+            # For "gated_weighted", use weighted fusion approach specifically for Confusion
+            # Based on benchmarks, this value optimizes accuracy while preserving F1
+            weighted_probs = 0.3 * mobilenet_probs + 0.7 * xgboost_probs
+            return np.argmax(weighted_probs)
+            
+        elif strategy == "gated_switch":
+            # For "gated_switch", hard switch to XGBoost for very low confidence predictions
+            return xgboost_class
+    
+    # Fallback to MobileNet prediction if strategy not recognized
+    return mobilenet_class
 
 def apply_temporal_smoothing(current_pred, emotion):
     """Apply temporal smoothing to predictions for stability."""
@@ -685,35 +729,19 @@ async def process_frame(frame, frame_count, frame_buffer, models):
     
     final_results = {}
     
-    # Process each emotion
+    # Process each emotion with optimized fusion strategy
     for emotion in EMOTIONS:
         # Get probabilities from models
-        pro_prob = pro_result[emotion]
-        xgb_prob = xgboost_result[emotion]
+        mobilenet_probs = pro_result[emotion]
+        xgboost_probs = xgboost_result[emotion]
         
-        # Get class with highest probability for each model
-        pro_class = np.argmax(pro_prob)
-        xgb_class = np.argmax(xgb_prob)
+        # Apply fusion strategy based on emotion-specific gates and methods
+        raw_pred = select_final_prediction(mobilenet_probs, xgboost_probs, emotion)
         
-        # Lower the confidence threshold to allow more variability
-        if pro_prob[pro_class] > 0.35:  # Lowered from 0.45 to allow more variability
-            # Use the predicted class directly for high confidence predictions
-            final_results[emotion] = pro_class
-        else:
-            # For lower confidence, still go through post-processing
-            pro_probs = np.array([pro_result[emotion]])
-            xgb_probs = np.array([xgboost_result[emotion]])
-            
-            pro_pred = apply_pro_ensemble_postprocessing(pro_probs, emotion)[0]
-            xgb_pred = apply_xgboost_postprocessing(np.array([xgb_class]), emotion)[0]
-            
-            # Select best model for this emotion
-            raw_pred = select_final_prediction(pro_pred, xgb_pred, emotion)
-            
-            # Apply temporal smoothing
-            smooth_pred = apply_temporal_smoothing(raw_pred, emotion)
-            
-            final_results[emotion] = smooth_pred
+        # Apply temporal smoothing
+        smooth_pred = apply_temporal_smoothing(raw_pred, emotion)
+        
+        final_results[emotion] = smooth_pred
     
     # Debug output to see what values are being produced
     # print(f"Final results: {final_results}")
