@@ -1264,7 +1264,7 @@ async def index_page():
                         y_pos += 25
                     
                     # Convert to JPEG and update display
-                    _, buffer = cv2.imencode('.jpg', frame_rgb, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
                     img_base64 = base64.b64encode(buffer).decode('utf-8')
                     webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;background-color:black;">')
                 
