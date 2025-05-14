@@ -647,9 +647,14 @@ def apply_temporal_smoothing(current_pred, emotion):
 # -------------------------------------------------------------------------
 #                      SYSTEM MONITORING FUNCTIONS
 # -------------------------------------------------------------------------
+# Find these functions around line ~288-310
 def get_cpu_utilization():
     """Get current CPU utilization."""
-    return psutil.cpu_percent()
+    try:
+        return psutil.cpu_percent()
+    except Exception as e:
+        print(f"Error getting CPU usage: {e}")
+        return 0
 
 def get_gpu_utilization():
     """Get current GPU utilization if available."""
@@ -657,23 +662,32 @@ def get_gpu_utilization():
         if torch.cuda.is_available():
             # This requires pynvml
             nvidia_smi_path = 'nvidia-smi'
-            result = os.popen(f'"{nvidia_smi_path}" --query-gpu=utilization.gpu --format=csv,noheader,nounits').read()
-            return int(result.strip())
+            try:
+                result = os.popen(f'"{nvidia_smi_path}" --query-gpu=utilization.gpu --format=csv,noheader,nounits').read()
+                return int(result.strip())
+            except (ValueError, TypeError, Exception) as e:
+                print(f"GPU utilization error: {e}")
+                return 0
         return 0
-    except:
+    except Exception as e:
+        print(f"Error checking GPU: {e}")
         return 0
 
 def determine_processing_rate():
     """Determine frame processing rate based on system load."""
-    cpu_load = get_cpu_utilization()
-    gpu_load = get_gpu_utilization()
-    
-    if cpu_load > CPU_HIGH_THRESHOLD or gpu_load > GPU_HIGH_THRESHOLD:
-        return "process_every_third_frame"
-    elif cpu_load > CPU_MEDIUM_THRESHOLD or gpu_load > GPU_MEDIUM_THRESHOLD:
-        return "process_every_second_frame"
-    else:
-        return "process_every_frame"
+    try:
+        cpu_load = get_cpu_utilization()
+        gpu_load = get_gpu_utilization()
+        
+        if cpu_load > CPU_HIGH_THRESHOLD or gpu_load > GPU_HIGH_THRESHOLD:
+            return "process_every_third_frame"
+        elif cpu_load > CPU_MEDIUM_THRESHOLD or gpu_load > GPU_MEDIUM_THRESHOLD:
+            return "process_every_second_frame"
+        else:
+            return "process_every_frame"
+    except Exception as e:
+        print(f"Error determining processing rate: {e}")
+        return "process_every_second_frame"  # Default to medium rate
 
 
 # -------------------------------------------------------------------------
@@ -857,40 +871,51 @@ class EmotionDetectionApp:
             'last_update': time.time()
         }
         
+    
     async def initialize_models(self):
         """Load all models asynchronously."""
         print("Starting model initialization...")
         
-        self.models['xgboost'] = await asyncio.get_event_loop().run_in_executor(
-            thread_pool, load_xgboost_models
-        )
-        
-        print(f"Looking for student model at: {DISTILL_MODEL_PATH}")
-        print(f"Model directory exists: {MODEL_DIR.exists()}")
-        print(f"Student model exists: {DISTILL_MODEL_PATH.exists()}")
-        
         try:
+            self.models['xgboost'] = await asyncio.get_event_loop().run_in_executor(
+                thread_pool, load_xgboost_models
+            )
+            
+            print(f"Looking for student model at: {DISTILL_MODEL_PATH}")
+            print(f"Model directory exists: {MODEL_DIR.exists()}")
+            print(f"Student model exists: {DISTILL_MODEL_PATH.exists()}")
+            
             self.models['student'] = await asyncio.get_event_loop().run_in_executor(
                 thread_pool, load_student_model
             )
         except Exception as e:
-            print(f"Error loading student model: {e}")
-            self.models['student'] = None
+            print(f"Error loading models: {e}")
+            import traceback
+            traceback.print_exc()
+            
+        # Validate models were loaded successfully
+        xgb_loaded = bool(self.models['xgboost']) and len(self.models['xgboost']) > 0
+        student_loaded = bool(self.models['student']) and self.models['student'].get('session') is not None
         
-        if not self.models['student'] and not self.models['xgboost']:
-            ui.notify('Failed to load any models! Please check the logs and restart the application.', type='negative')
+        if not xgb_loaded and not student_loaded:
+            ui.notify('Failed to load any models! Please check the logs and restart.', type='negative')
             return False
         
         ui.notify('Models loaded successfully!', type='positive')
         return True
-    
+        
+
     def update_system_info(self):
         """Update system information like CPU and GPU usage."""
-        self.system_info['cpu'] = get_cpu_utilization()
-        self.system_info['gpu'] = get_gpu_utilization()
-        self.system_info['processing_rate'] = determine_processing_rate()
-        self.system_info['last_update'] = time.time()
-    
+        try:
+            self.system_info['cpu'] = get_cpu_utilization()
+            self.system_info['gpu'] = get_gpu_utilization()
+            self.system_info['processing_rate'] = determine_processing_rate()
+            self.system_info['last_update'] = time.time()
+        except Exception as e:
+            print(f"Error updating system info: {e}")
+        # Don't overwrite previous values if there's an error
+        
     async def process_webcam_frame(self, frame):
         """Process a single frame from the webcam."""
         if not self.processing_active:
@@ -1187,90 +1212,118 @@ async def index_page():
                     with ui.column().classes('col-6'):
                         gpu_label = ui.label(f'GPU: {emotion_app.system_info["gpu"]}%')
                         device_label = ui.label(f'Device: {DEVICE}')
+                    
+    # Update system info every second                
+    async def update_system_info_task():
+        """Separate task to update system information regardless of webcam status"""
+        while True:
+            try:
+                # Update system info
+                emotion_app.update_system_info()
+                cpu_label.text = f'CPU: {emotion_app.system_info["cpu"]}%'
+                gpu_label.text = f'GPU: {emotion_app.system_info["gpu"]}%'
+                processing_label.text = f'Processing: {emotion_app.system_info["processing_rate"]}'
+            except Exception as e:
+                print(f"Error updating system info: {e}")
+            
+            await asyncio.sleep(1)  # Update every second regardless of webcam
     
     async def update_webcam_frame():
         while True:
-            if emotion_app.webcam_active:
-                frame = await emotion_app.get_webcam_frame()
-                if frame is not None:
-                    # Process frame
-                    results = await emotion_app.process_webcam_frame(frame)
-                    
-                    # Debug output to identify problems
-                    # print(f"Debug: Sending to advice generator: {results}")
-                    advice = generate_advice(results)
-                    # print(f"Debug: Generated advice: '{advice}'")
-                    
-                    # Update UI with results for each emotion
-                    for emotion in EMOTIONS:
-                        value = results[emotion]
-                        label = get_emotion_label(value, emotion)
-                        color = get_emotion_color(value, emotion)
+            try:
+                if emotion_app.webcam_active:
+                    frame = await emotion_app.get_webcam_frame()
+                    if frame is not None:
+                        # Process frame
+                        results = await emotion_app.process_webcam_frame(frame)
                         
-                        emotion_labels[emotion].text = label
-                        emotion_meters[emotion].value = (value + 1) / 4
-                        emotion_meters[emotion].props(f'color={color}')
-                    
+                        # Debug output to identify problems
+                        # print(f"Debug: Sending to advice generator: {results}")
+                        advice = generate_advice(results)
+                        # print(f"Debug: Generated advice: '{advice}'")
+                        
+                        # Update UI with results for each emotion
+                        for emotion in EMOTIONS:
+                            value = results[emotion]
+                            label = get_emotion_label(value, emotion)
+                            color = get_emotion_color(value, emotion)
+                            
+                            emotion_labels[emotion].text = label
+                            emotion_meters[emotion].value = (value + 1) / 4
+                            emotion_meters[emotion].props(f'color={color}')
+                        
+                        with advice_container:
+                            if advice != emotion_app.prev_advice:
+                                try:
+                                    # Split advice and explanation
+                                    if "\n\n" in advice:
+                                        advice_text, explanation_text = advice.split("\n\n", 1)
+                                        ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice_text)};")
+                                        ui.run_javascript(f"var el = document.getElementById('explanation_label'); if(el) el.innerText = {json.dumps(explanation_text)};")
+                                    else:
+                                        ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice)};")
+                                        ui.run_javascript(f"var el = document.getElementById('explanation_label'); if(el) el.innerText = '';")
+                                    emotion_app.prev_advice = advice
+                                except Exception as err:
+                                    print("JS update error:", err)
 
-                    with advice_container:
-                        if advice != emotion_app.prev_advice:
-                            try:
-                                # Split advice and explanation
-                                if "\n\n" in advice:
-                                    advice_text, explanation_text = advice.split("\n\n", 1)
-                                    ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice_text)};")
-                                    ui.run_javascript(f"var el = document.getElementById('explanation_label'); if(el) el.innerText = {json.dumps(explanation_text)};")
-                                else:
-                                    ui.run_javascript(f"var el = document.getElementById('advice_label'); if(el) el.innerText = {json.dumps(advice)};")
-                                    ui.run_javascript(f"var el = document.getElementById('explanation_label'); if(el) el.innerText = '';")
-                                emotion_app.prev_advice = advice
-                            except Exception as err:
-                                print("JS update error:", err)
-
-                    # Update system info
-                    emotion_app.update_system_info()
-                    cpu_label.text = f'CPU: {emotion_app.system_info["cpu"]}%'
-                    gpu_label.text = f'GPU: {emotion_app.system_info["gpu"]}%'
-                    processing_label.text = f'Processing: {emotion_app.system_info["processing_rate"]}'
-                    
-                    # Process frame for display
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Draw emotion states
-                    y_pos = 30
-                    frame_height, frame_width = frame_rgb.shape[:2]
-                    
-                    for emotion in EMOTIONS:
-                        value = results[emotion]
-                        label = get_emotion_label(value, emotion)
+                        # Process frame for display
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         
-                        icon_text = {
-                            "Engagement": "1",
-                            "Boredom": "2", 
-                            "Confusion": "3",
-                            "Frustration": "4"
-                        }[emotion]
+                        # Draw emotion states
+                        y_pos = 30
+                        frame_height, frame_width = frame_rgb.shape[:2]
                         
-                        text = f"{icon_text}: {emotion} - {label}"
+                        for emotion in EMOTIONS:
+                            value = results[emotion]
+                            label = get_emotion_label(value, emotion)
+                            
+                            icon_text = {
+                                "Engagement": "1",
+                                "Boredom": "2", 
+                                "Confusion": "3",
+                                "Frustration": "4"
+                            }[emotion]
+                            
+                            text = f"{icon_text}: {emotion} - {label}"
+                            
+                            text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                            cv2.rectangle(frame_rgb, 
+                                        (10, y_pos - 15), 
+                                        (min(frame_width - 10, 10 + text_size[0] + 10), y_pos + 5),
+                                        (240, 240, 240), -1)
+                            
+                            cv2.putText(frame_rgb, text, (15, y_pos), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+                            y_pos += 25
                         
-                        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                        cv2.rectangle(frame_rgb, 
-                                    (10, y_pos - 15), 
-                                    (min(frame_width - 10, 10 + text_size[0] + 10), y_pos + 5),
-                                    (240, 240, 240), -1)
-                        
-                        cv2.putText(frame_rgb, text, (15, y_pos), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
-                        y_pos += 25
-                    
-                    # Convert to JPEG and update display
-                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    img_base64 = base64.b64encode(buffer).decode('utf-8')
-                    webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;background-color:black;">')
+                        # Convert to JPEG and update display
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        img_base64 = base64.b64encode(buffer).decode('utf-8')
+                        webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;background-color:black;">')
+            except Exception as e:
+                print(f"Error in webcam processing loop: {e}")
+                import traceback
+                traceback.print_exc()
                 
-            await asyncio.sleep(1/30)  # Target 30 FPS UI updates
+                # Add recovery logic - don't let one error kill the whole loop
+                if emotion_app.webcam:
+                    try:
+                        # Try to restart the webcam
+                        emotion_app.webcam_active = False
+                        emotion_app.webcam.release()
+                        emotion_app.webcam = None
+                        ui.notify("Webcam error occurred - attempting to recover", type="warning")
+                        # Wait before attempting to restart
+                        await asyncio.sleep(2)
+                        await emotion_app.start_webcam()
+                    except:
+                        pass
+                    
+            await asyncio.sleep(1/20)  # Target 30 FPS UI updates
         
     # Start the update loop
     asyncio.create_task(update_webcam_frame())
+    asyncio.create_task(update_system_info_task())
 
 ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080, reload=False)
