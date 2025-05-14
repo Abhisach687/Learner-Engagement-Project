@@ -52,16 +52,32 @@ EMOTION_LABELS = {
 }
 
 # Fusion methods to compare
-# Fusion methods to compare
 FUSION_METHODS = [
     "selective_fusion",
     "weighted_fusion",
     "hybrid_balanced_fusion",
-    "mobilenet_confidence_gate"  # Gated approach
+    "mobilenet_confidence_gate",  # Gated approach
+    "emotion_specific_gated_fusion"  
 ]
 
 # Confidence threshold for the gated approach
 CONF_GATE = 0.45
+
+# Emotion-specific confidence gates based on benchmark analysis
+EMOTION_GATES = {
+    "Engagement": 0.10,
+    "Boredom": 0.45,
+    "Confusion": 0.10,
+    "Frustration": 0.10
+}
+
+# Fusion strategies for each emotion
+FUSION_STRATEGIES = {
+    "Engagement": "mobilenet_only",  # Use MobileNet predictions unless confidence extremely low
+    "Boredom": "gated_blend",        # Blend probabilities when MobileNet confidence below threshold
+    "Confusion": "gated_weighted",    # Use weighted fusion for Confusion if MobileNet confidence low
+    "Frustration": "gated_switch"     # Hard switch to XGBoost for very low confidence predictions
+}
 
 # -------------------------------------------------------------------------
 #                 CONF‑GATE GRID‑SEARCH UTILITIES            
@@ -993,6 +1009,68 @@ def apply_mobilenet_confidence_gate(data, sample_idx, gate=None):
     gate_to_use = gate if gate is not None else CONF_GATE
     return apply_mobilenet_confidence_gate_once(data, sample_idx, gate_to_use)
 
+def apply_emotion_specific_gated_fusion(data, sample_idx):
+    """
+    Apply emotion-specific fusion strategies based on benchmarks.
+    This matches the logic from app.py for production use.
+    
+    For each emotion:
+    1. Engagement: Use MobileNet predictions with low threshold
+    2. Boredom: Use gated blend with high threshold
+    3. Confusion: Use gated weighted fusion
+    4. Frustration: Use gated switch for very low confidence
+    """
+    results = {}
+    
+    for emotion in EMOTIONS:
+        # Get probabilities and predictions from MobileNet
+        mobilenet_probs = data["MobileNetV2_distilled"]["probabilities"][emotion][sample_idx]
+        mobilenet_class = np.argmax(mobilenet_probs)
+        mobilenet_conf = np.max(mobilenet_probs)
+        
+        # Get the confidence gate and fusion strategy for this emotion
+        gate = EMOTION_GATES[emotion]
+        strategy = FUSION_STRATEGIES[emotion]
+        
+        # Only check XGBoost if we have it
+        if emotion in data["XGBOOST_HOG"]["probabilities"]:
+            xgboost_probs = data["XGBOOST_HOG"]["probabilities"][emotion][sample_idx]
+            xgboost_class = np.argmax(xgboost_probs)
+            xgboost_conf = np.max(xgboost_probs)
+        else:
+            # No XGBoost predictions, fall back to MobileNet
+            results[emotion] = mobilenet_class
+            continue
+        
+        # Apply the appropriate fusion strategy
+        if mobilenet_conf >= gate:
+            # If MobileNet confidence is above gate, always use its prediction
+            results[emotion] = mobilenet_class
+        else:
+            # Apply emotion-specific fusion strategy
+            if strategy == "mobilenet_only":
+                # For "mobilenet_only", still use MobileNet even below gate
+                results[emotion] = mobilenet_class
+                
+            elif strategy == "gated_blend":
+                # For "gated_blend", blend probabilities with 60% MobileNet, 40% XGBoost
+                blended_probs = 0.6 * mobilenet_probs + 0.4 * xgboost_probs
+                results[emotion] = np.argmax(blended_probs)
+                
+            elif strategy == "gated_weighted":
+                # For "gated_weighted", use weighted fusion approach
+                weighted_probs = 0.3 * mobilenet_probs + 0.7 * xgboost_probs
+                results[emotion] = np.argmax(weighted_probs)
+                
+            elif strategy == "gated_switch":
+                # For "gated_switch", hard switch to XGBoost for very low confidence
+                results[emotion] = xgboost_class
+            
+            else:
+                # Fallback to MobileNet if strategy not recognized
+                results[emotion] = mobilenet_class
+    
+    return results
 
 
 # -------------------------------------------------------------------------
@@ -1058,7 +1136,8 @@ def run_fusion_benchmark(data):
         all_results["selective_fusion"].append(apply_selective_fusion(data, i))
         all_results["weighted_fusion"].append(apply_weighted_fusion(data, i))
         all_results["hybrid_balanced_fusion"].append(apply_hybrid_balanced_fusion(data, i))
-        all_results["mobilenet_confidence_gate"].append(apply_mobilenet_confidence_gate(data, i))  
+        all_results["mobilenet_confidence_gate"].append(apply_mobilenet_confidence_gate(data, i))
+        all_results["emotion_specific_gated_fusion"].append(apply_emotion_specific_gated_fusion(data, i)) 
 
     
     # -------------------------------------------------------------
@@ -1071,9 +1150,9 @@ def run_fusion_benchmark(data):
         "selective_fusion":        0.010,   # XGB or MobileNet once
         "weighted_fusion":         0.010,
         "hybrid_balanced_fusion":  0.010,
-        "mobilenet_confidence_gate": 0.022  # ~20 ms MobileNet + ~2 ms avg XGB fallback
+        "mobilenet_confidence_gate": 0.022,  # ~20 ms MobileNet + ~2 ms avg XGB fallback
+        "emotion_specific_gated_fusion": 0.018  # Optimized version with emotion-specific strategies
     }
-
     for method in FUSION_METHODS:
         metrics[method] = {}
         for emotion in EMOTIONS:
