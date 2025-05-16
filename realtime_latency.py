@@ -18,6 +18,10 @@ from skimage.feature import hog
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
+import json
+import platform
+from pathlib import Path
+from datetime import datetime
 
 # -------------------------------------------------------------------------
 #                      CONFIGURATION AND PATHS
@@ -54,9 +58,23 @@ TEST_FUSION_STRATEGIES = True  # Set to True to test different fusion strategies
 FUSION_TEST_MODES = [
     "all_mobilenet", 
     "all_xgboost", 
-    "gated_fusion"  # Uses emotion-specific gates and strategies
+    "gated_fusion",
+    "selective_fusion",
+    "weighted_fusion",
+    "hybrid_balanced_fusion",
+    "mobilenet_confidence_gate"
 ]
-CURRENT_TEST_MODE = "gated_fusion"  # Default to the full gated fusion approach
+CURRENT_TEST_MODE = "all_mobilenet"  # Default to specific test mode
+
+# Add after the TEST_FUSION_STRATEGIES section around line 67
+
+# Auto-benchmark settings
+AUTO_BENCHMARK_MODE = False  # Set to True to automatically benchmark all fusion strategies
+AUTO_BENCHMARK_DURATION = 30  # Seconds per strategy
+AUTO_BENCHMARK_RESULTS = {}  # Store results for each strategy
+AUTO_BENCHMARK_CURRENT = None  # Currently tested strategy
+AUTO_BENCHMARK_START_TIME = 0  # When current strategy test started
+AUTO_BENCHMARK_LOG_FILE = Path("fusion_latency_benchmark_results.json")
 
 # Track fusion-specific latency
 fusion_latencies = {
@@ -96,7 +114,135 @@ results_buffer = deque(maxlen=SMOOTHING_WINDOW)  # For temporal smoothing
 gate_triggered_counts = {emotion: 0 for emotion in EMOTIONS}
 gate_total_counts = {emotion: 0 for emotion in EMOTIONS}
 
+# Track which strategy is actually used for each emotion
+emotion_strategy_map = {emotion: FUSION_STRATEGIES.get(emotion, "unknown") for emotion in EMOTIONS}
 
+# Auto benchmark settings
+def update_benchmark_strategy(latency_tracker):
+    """Update the benchmark strategy based on timing."""
+    global AUTO_BENCHMARK_CURRENT, AUTO_BENCHMARK_START_TIME, CURRENT_TEST_MODE
+    global AUTO_BENCHMARK_RESULTS, AUTO_BENCHMARK_MODE
+    global fusion_latencies, emotion_latencies, gate_triggered_counts, gate_total_counts
+    
+    # If not in auto benchmark mode, do nothing
+    if not AUTO_BENCHMARK_MODE:
+        return
+    
+    current_time = time.time()
+    
+    # Initialize if not started
+    if AUTO_BENCHMARK_CURRENT is None:
+        AUTO_BENCHMARK_CURRENT = FUSION_TEST_MODES[0]
+        CURRENT_TEST_MODE = AUTO_BENCHMARK_CURRENT
+        AUTO_BENCHMARK_START_TIME = current_time
+        print("\n" + "="*50)
+        print(f"BENCHMARK STARTED: {AUTO_BENCHMARK_CURRENT}")
+        print("="*50 + "\n")
+        
+        # Initialize these counters if they don't exist yet
+        if 'gate_triggered_counts' not in globals():
+            global gate_triggered_counts
+            gate_triggered_counts = {emotion: 0 for emotion in EMOTIONS}
+        
+        if 'gate_total_counts' not in globals():
+            global gate_total_counts
+            gate_total_counts = {emotion: 0 for emotion in EMOTIONS}
+            
+        # Reset all counters for this strategy
+        fusion_latencies = {mode: deque(maxlen=100) for mode in FUSION_TEST_MODES}
+        emotion_latencies = {emotion: deque(maxlen=100) for emotion in EMOTIONS}
+        gate_triggered_counts = {emotion: 0 for emotion in EMOTIONS}
+        gate_total_counts = {emotion: 0 for emotion in EMOTIONS}
+        return
+    
+    # Check if it's time to switch strategies
+    elapsed = current_time - AUTO_BENCHMARK_START_TIME
+    
+    if elapsed >= AUTO_BENCHMARK_DURATION:
+        # Collect results for the current strategy
+        stats = latency_tracker.get_stats()
+        
+        # Calculate fusion time average
+        fusion_time = 0
+        if AUTO_BENCHMARK_CURRENT in fusion_latencies and fusion_latencies[AUTO_BENCHMARK_CURRENT]:
+            fusion_time = sum(fusion_latencies[AUTO_BENCHMARK_CURRENT]) / len(fusion_latencies[AUTO_BENCHMARK_CURRENT])
+        
+        # Create emotion_latencies_avg dictionary safely
+        emotion_latencies_avg = {}
+        for emotion in EMOTIONS:
+            if emotion in emotion_latencies and emotion_latencies[emotion]:
+                emotion_latencies_avg[emotion] = sum(emotion_latencies[emotion]) / len(emotion_latencies[emotion])
+            else:
+                emotion_latencies_avg[emotion] = 0
+                
+        # Calculate gate percentages safely
+        gate_percentages = {}
+        for emotion in EMOTIONS:
+            total = max(1, gate_total_counts.get(emotion, 0))
+            triggered = gate_triggered_counts.get(emotion, 0)
+            gate_percentages[emotion] = (triggered / total) * 100 if total > 0 else 0
+                
+        # Store results
+        AUTO_BENCHMARK_RESULTS[AUTO_BENCHMARK_CURRENT] = {
+            "avg_latency": stats["average"] if "average" in stats else 0,
+            "min_latency": stats["best"] if "best" in stats else 0,
+            "max_latency": stats["worst"] if "worst" in stats else 0,
+            "p95_latency": stats.get("percentile_95", 0),
+            "mobilenet_time": stats.get("component_averages", {}).get("mobilenet", 0),
+            "xgboost_time": stats.get("component_averages", {}).get("xgboost", 0),
+            "fusion_time": fusion_time,
+            "emotion_latencies": emotion_latencies_avg,
+            "gate_triggered": gate_percentages
+        }
+        
+        # Find the next strategy to test
+        current_index = FUSION_TEST_MODES.index(AUTO_BENCHMARK_CURRENT)
+        next_index = (current_index + 1) % len(FUSION_TEST_MODES)
+        
+        # Reset counters for the next strategy
+        emotion_latencies = {emotion: deque(maxlen=100) for emotion in EMOTIONS}
+        gate_triggered_counts = {emotion: 0 for emotion in EMOTIONS}
+        gate_total_counts = {emotion: 0 for emotion in EMOTIONS}
+        
+        # Check if we've completed testing all strategies
+        if next_index == 0 or current_index == len(FUSION_TEST_MODES) - 1:
+            print("\n" + "="*50)
+            print("BENCHMARK COMPLETED")
+            print("="*50 + "\n")
+            
+            # Save results
+            result_file = save_benchmark_results(AUTO_BENCHMARK_RESULTS)
+            
+            # Print summary
+            print("\n" + "="*50)
+            print("BENCHMARK SUMMARY")
+            print("="*50)
+            
+            for strategy, data in AUTO_BENCHMARK_RESULTS.items():
+                print(f"{strategy}: {data['avg_latency']:.2f}ms avg, {data['min_latency']:.2f}ms best")
+                
+            print("="*50)
+            print(f"Results saved to {result_file}")
+            print("="*50 + "\n")
+            
+            # Turn off auto benchmark mode
+            AUTO_BENCHMARK_MODE = False
+            # Reset the strategy map to reflect we're no longer in benchmark mode
+            global emotion_strategy_map
+            for emotion in EMOTIONS:
+                emotion_strategy_map[emotion] = FUSION_STRATEGIES.get(emotion, "unknown")
+            return
+        
+        # Switch to next strategy
+        AUTO_BENCHMARK_CURRENT = FUSION_TEST_MODES[next_index]
+        CURRENT_TEST_MODE = AUTO_BENCHMARK_CURRENT
+        AUTO_BENCHMARK_START_TIME = current_time
+        
+        print("\n" + "="*50)
+        print(f"SWITCHING TO STRATEGY: {AUTO_BENCHMARK_CURRENT}")
+        print(f"Previous strategy complete: {FUSION_TEST_MODES[current_index]}")
+        print("="*50 + "\n")
+        
 # Add a function to display the emotion-specific fusion latencies in the console
 def log_emotion_fusion_stats():
     """Log emotion-specific fusion latencies to console."""
@@ -111,8 +257,26 @@ def log_emotion_fusion_stats():
         if emotion in emotion_latencies and len(emotion_latencies[emotion]) > 0:
             avg_time = sum(emotion_latencies[emotion]) / len(emotion_latencies[emotion])
             all_emotion_averages[emotion] = avg_time
-            strategy = FUSION_STRATEGIES[emotion]
+            
+            # Get gate values for current mode
             gate = EMOTION_GATES[emotion]
+            
+            # Get appropriate strategy name based on current test mode
+            if CURRENT_TEST_MODE == "all_mobilenet":
+                strategy_name = "mobilenet_only"
+            elif CURRENT_TEST_MODE == "all_xgboost":
+                strategy_name = "xgboost_only"
+            elif CURRENT_TEST_MODE == "selective_fusion":
+                strategy_name = "mobilenet_only" if emotion == "Engagement" else "xgboost_only"
+            elif CURRENT_TEST_MODE == "weighted_fusion":
+                strategy_name = "weighted_fusion"
+            elif CURRENT_TEST_MODE == "hybrid_balanced_fusion":
+                strategy_name = "mobilenet_only" if emotion in ["Engagement", "Boredom", "Frustration"] else "weighted_fusion"
+            elif CURRENT_TEST_MODE == "mobilenet_confidence_gate":
+                strategy_name = "confidence_gated"
+            else:
+                # For gated_fusion, use the emotion-specific strategy
+                strategy_name = FUSION_STRATEGIES[emotion]
             
             # Calculate how often the gate was triggered
             if emotion in gate_triggered_counts and emotion in gate_total_counts and gate_total_counts[emotion] > 0:
@@ -120,7 +284,7 @@ def log_emotion_fusion_stats():
             else:
                 trigger_percentage = 0.0
                 
-            print(f"{emotion:12} | Strategy: {strategy:15} | Gate: {gate:.3f} | Used XGBoost: {trigger_percentage:.1f}% | Latency: {avg_time:.3f} ms")
+            print(f"{emotion:12} | Strategy: {strategy_name:15} | Gate: {gate:.3f} | Used XGBoost: {trigger_percentage:.1f}% | Latency: {avg_time:.3f} ms")
     
     # Calculate overall average
     if all_emotion_averages:
@@ -209,6 +373,29 @@ def log_complete_fusion_stats(latency_tracker, mobilenet_times, xgboost_times):
     print(f"{'-'*70}")
     print(f"Component times: MobileNet={avg_mobilenet:.2f}ms, XGBoost={avg_xgboost:.2f}ms, Decision={avg_case:.2f}ms")
     print(f"{'-'*70}\n")
+    
+    
+def print_benchmark_status():
+    """Print current benchmark status to the console."""
+    print("\n" + "="*70)
+    print(f"CURRENT BENCHMARK STATUS: {AUTO_BENCHMARK_CURRENT}")
+    print("="*70)
+    
+    # Show which strategies are active for which emotions
+    print("Active strategies per emotion:")
+    for emotion in EMOTIONS:
+        strategy = emotion_strategy_map.get(emotion, "unknown")
+        print(f"  {emotion:12} | {strategy}")
+    
+    # Show progress
+    completed = FUSION_TEST_MODES.index(AUTO_BENCHMARK_CURRENT) if AUTO_BENCHMARK_CURRENT in FUSION_TEST_MODES else 0
+    total = len(FUSION_TEST_MODES)
+    print(f"Progress: {completed+1}/{total} strategies")
+    
+    elapsed = time.time() - AUTO_BENCHMARK_START_TIME
+    remaining = max(0, AUTO_BENCHMARK_DURATION - elapsed)
+    print(f"Current strategy time: {elapsed:.1f}s / {AUTO_BENCHMARK_DURATION}s (Remaining: {remaining:.1f}s)")
+    print("="*70 + "\n")
 
 # -------------------------------------------------------------------------
 #                      STUDENT MODEL DEFINITION
@@ -676,83 +863,119 @@ async def run_xgboost_batch(hog_features_batch, xgb_models):
         return {emo: np.ones((batch_size, 4)) * 0.25 for emo in EMOTIONS}
 
 def select_final_prediction(mobilenet_probs, xgboost_probs, emotion):
-    """
-    Apply emotion-specific fusion strategies based on benchmark analysis.
-    
-    Note: This function only measures the DECISION LOGIC latency, not the full
-    model inference times. The actual model inference times are measured separately
-    in the process_batch function (mobilenet_time and xgboost_time variables).
-    
-    Args:
-        mobilenet_probs: Probability distribution from MobileNet model
-        xgboost_probs: Probability distribution from XGBoost model
-        emotion: Emotion type being processed
-    
-    Returns:
-        Predicted class after fusion, fusion decision latency in ms, and whether gate was triggered
-    """
-    # Start fusion timing (DECISION LOGIC ONLY)
+    """Select final prediction based on fusion strategy."""
+    # Start fusion timing
     fusion_start = time.time()
     
-    # Get maximum probability and its class from MobileNet
+    # Get classes and confidences
     mobilenet_conf = np.max(mobilenet_probs)
     mobilenet_class = np.argmax(mobilenet_probs)
-    
-    # Get maximum probability and its class from XGBoost
     xgboost_conf = np.max(xgboost_probs)
     xgboost_class = np.argmax(xgboost_probs)
     
-    # Test different fusion strategies based on configuration
+    # Default no gate triggering
     gate_triggered = False
     
-    if TEST_FUSION_STRATEGIES:
-        if CURRENT_TEST_MODE == "all_mobilenet":
-            # Always use MobileNet prediction
-            fusion_time = (time.time() - fusion_start) * 1000
-            return mobilenet_class, fusion_time, gate_triggered
-            
-        elif CURRENT_TEST_MODE == "all_xgboost":
-            # Always use XGBoost prediction
-            fusion_time = (time.time() - fusion_start) * 1000
-            return xgboost_class, fusion_time, gate_triggered
+    # For displaying the correct strategy in logs
+    actual_strategy_used = CURRENT_TEST_MODE
     
-    # Default to gated fusion (emotion-specific)
-    gate = EMOTION_GATES[emotion]
-    strategy = FUSION_STRATEGIES[emotion]
-    
-    # Apply the appropriate fusion strategy
-    if mobilenet_conf >= gate:
-        # If MobileNet confidence is above gate, use its prediction
+    # Apply the selected fusion strategy
+    if CURRENT_TEST_MODE == "all_mobilenet":
+        # Always use MobileNet prediction
         result = mobilenet_class
-    else:
-        # Gate was triggered - using alternative strategy
-        gate_triggered = True
+        actual_strategy_used = "mobilenet_only"
         
-        # Apply emotion-specific fusion strategy
-        if strategy == "mobilenet_only":
-            # For "mobilenet_only", still use MobileNet even below gate
+    elif CURRENT_TEST_MODE == "all_xgboost":
+        # Always use XGBoost prediction
+        result = xgboost_class
+        actual_strategy_used = "xgboost_only"
+        
+    elif CURRENT_TEST_MODE == "selective_fusion":
+        # Use MobileNet for Engagement, XGBoost for others
+        if emotion == "Engagement":
             result = mobilenet_class
+            actual_strategy_used = "mobilenet_only"
+        else:
+            result = xgboost_class
+            actual_strategy_used = "xgboost_only"
             
-        elif strategy == "gated_blend":
-            # For "gated_blend", blend probabilities with 60% MobileNet, 40% XGBoost
-            blended_probs = 0.6 * mobilenet_probs + 0.4 * xgboost_probs
-            result = np.argmax(blended_probs)
-            
-        elif strategy == "gated_weighted":
-            # For "gated_weighted", use weighted fusion approach for Confusion
+    elif CURRENT_TEST_MODE == "weighted_fusion":
+        # Apply weighted fusion based on predefined weights
+        weights = {
+            "Engagement": [0.6, 0.4],    # [MobileNet, XGBoost]
+            "Boredom": [0.3, 0.7],
+            "Confusion": [0.3, 0.7],
+            "Frustration": [0.3, 0.7]
+        }
+        
+        w1 = weights[emotion][0]
+        w2 = weights[emotion][1]
+        weighted_probs = w1 * mobilenet_probs + w2 * xgboost_probs
+        result = np.argmax(weighted_probs)
+        actual_strategy_used = f"weighted_{w1}_{w2}"
+        
+    elif CURRENT_TEST_MODE == "hybrid_balanced_fusion":
+        # Apply different strategy based on emotion
+        if emotion == "Engagement":
+            # Use MobileNet for Engagement
+            result = mobilenet_class
+            actual_strategy_used = "mobilenet_only"
+        elif emotion in ["Boredom", "Frustration"]:
+            # Use MobileNet for these
+            result = mobilenet_class
+            actual_strategy_used = "mobilenet_only"
+        else:
+            # For Confusion, use weighted fusion
             weighted_probs = 0.3 * mobilenet_probs + 0.7 * xgboost_probs
             result = np.argmax(weighted_probs)
+            actual_strategy_used = "weighted_0.3_0.7"
             
-        elif strategy == "gated_switch":
-            # For "gated_switch", hard switch to XGBoost for very low confidence
-            result = xgboost_class
-        else:
-            # Fallback to MobileNet prediction if strategy not recognized
+    elif CURRENT_TEST_MODE == "mobilenet_confidence_gate":
+        # Global confidence gate (not emotion-specific)
+        global_gate = 0.45
+        if mobilenet_conf >= global_gate:
             result = mobilenet_class
+            actual_strategy_used = "mobilenet_only"
+        else:
+            gate_triggered = True
+            result = xgboost_class if xgboost_conf > mobilenet_conf else mobilenet_class
+            actual_strategy_used = "confidence_gated"
+            
+    else:  # Default to gated_fusion (emotion-specific)
+        # Get emotion-specific gate and strategy
+        gate = EMOTION_GATES[emotion]
+        strategy = FUSION_STRATEGIES[emotion]
+        
+        if mobilenet_conf >= gate:
+            # If MobileNet confidence is above gate, use its prediction
+            result = mobilenet_class
+            actual_strategy_used = "mobilenet_only"
+        else:
+            # Gate was triggered
+            gate_triggered = True
+            
+            # Apply emotion-specific fusion strategy
+            if strategy == "mobilenet_only":
+                result = mobilenet_class
+                actual_strategy_used = "mobilenet_only"
+            elif strategy == "gated_blend":
+                blended_probs = 0.6 * mobilenet_probs + 0.4 * xgboost_probs
+                result = np.argmax(blended_probs)
+                actual_strategy_used = "gated_blend"
+            elif strategy == "gated_weighted":
+                weighted_probs = 0.3 * mobilenet_probs + 0.7 * xgboost_probs
+                result = np.argmax(weighted_probs)
+                actual_strategy_used = "gated_weighted"
+            elif strategy == "gated_switch":
+                result = xgboost_class
+                actual_strategy_used = "gated_switch"
+            else:
+                result = mobilenet_class
+                actual_strategy_used = "mobilenet_only"
     
     # Calculate fusion time
     fusion_time = (time.time() - fusion_start) * 1000
-    return result, fusion_time, gate_triggered
+    return result, fusion_time, gate_triggered, actual_strategy_used
 
 def apply_temporal_smoothing(current_pred, emotion, results_buffer):
     """Apply temporal smoothing to predictions for stability."""
@@ -775,6 +998,55 @@ def apply_temporal_smoothing(current_pred, emotion, results_buffer):
     
     # Return the class with highest smoothed count
     return np.argmax(counts)
+
+def save_benchmark_results(results):
+    """Save benchmark results to a JSON file."""
+    import json
+    from datetime import datetime
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"fusion_benchmark_{timestamp}.json"
+    
+    # Format results for saving
+    formatted_results = {}
+    for strategy, data in results.items():
+        formatted_results[strategy] = {
+            "latency": {
+                "avg": data.get("avg_latency", 0),
+                "min": data.get("min_latency", 0),
+                "max": data.get("max_latency", 0),
+                "p95": data.get("p95_latency", 0),
+            },
+            "component_times": {
+                "mobilenet": data.get("mobilenet_time", 0),
+                "xgboost": data.get("xgboost_time", 0),
+                "fusion": data.get("fusion_time", 0),
+            },
+            "emotions": {}
+        }
+        
+        # Add emotion-specific data
+        for emotion in EMOTIONS:
+            if emotion in data.get("emotion_latencies", {}):
+                formatted_results[strategy]["emotions"][emotion] = {
+                    "latency": data["emotion_latencies"][emotion],
+                    "gate_triggered_pct": data.get("gate_triggered", {}).get(emotion, 0),
+                }
+    
+    # Add system information
+    formatted_results["system_info"] = {
+        "device": str(DEVICE),
+        "batch_size": BATCH_SIZE,
+        "frame_history": FRAME_HISTORY,
+        "timestamp": timestamp
+    }
+    
+    # Save to file
+    with open(filename, 'w') as f:
+        json.dump(formatted_results, f, indent=2)
+    
+    print(f"Benchmark results saved to {filename}")
+    return filename
 
 # -------------------------------------------------------------------------
 #                      LATENCY MEASUREMENT
@@ -856,6 +1128,7 @@ class LatencyTracker:
             # Reset for next window
             self.window_start_time = current_time
             self.window_latencies = []
+            
             
     def add_fusion_latency(self, strategy, time_ms, emotion=None):
         """Track latency for specific fusion strategy."""
@@ -1014,6 +1287,8 @@ async def process_batch(frame_batch, frame_buffer, models, latency_tracker):
     postprocess_start = time.time()
     final_results = []
     fusion_times = {emotion: [] for emotion in EMOTIONS}
+    # Track which strategy was actually used for each emotion
+    strategy_used = {emotion: [] for emotion in EMOTIONS}
 
     for i in range(batch_size):
         frame_result = {}
@@ -1023,14 +1298,17 @@ async def process_batch(frame_batch, frame_buffer, models, latency_tracker):
             mobilenet_probs = pro_results[emotion][i]
             xgboost_probs = xgboost_results[emotion][i]
             
-            # In the process_batch function where you call select_final_prediction:
-            raw_pred, fusion_time, gate_triggered = select_final_prediction(mobilenet_probs, xgboost_probs, emotion)
+            # Call with updated function signature
+            raw_pred, fusion_time, gate_triggered, actual_strategy = select_final_prediction(
+                mobilenet_probs, xgboost_probs, emotion
+            )
 
             # Update gate statistics
             gate_total_counts[emotion] = gate_total_counts.get(emotion, 0) + 1
             if gate_triggered:
                 gate_triggered_counts[emotion] = gate_triggered_counts.get(emotion, 0) + 1
             fusion_times[emotion].append(fusion_time)
+            strategy_used[emotion].append(actual_strategy)
             
             # Update fusion latency tracking
             latency_tracker.add_fusion_latency(CURRENT_TEST_MODE, fusion_time, emotion)
@@ -1041,6 +1319,14 @@ async def process_batch(frame_batch, frame_buffer, models, latency_tracker):
             frame_result[emotion] = smooth_pred
         
         final_results.append(frame_result)
+    
+    # Update the fusion strategy info for display
+    for emotion in EMOTIONS:
+        if strategy_used[emotion]:
+            # Take the most common strategy used for this emotion
+            from collections import Counter
+            most_common_strategy = Counter(strategy_used[emotion]).most_common(1)[0][0]
+            emotion_strategy_map[emotion] = most_common_strategy
     
     postprocess_time = (time.time() - postprocess_start) * 1000
     
@@ -1073,6 +1359,117 @@ async def process_batch(frame_batch, frame_buffer, models, latency_tracker):
 # -------------------------------------------------------------------------
 #                      VISUALIZATION FUNCTIONS
 # -------------------------------------------------------------------------
+
+
+def draw_benchmark_comparison(frame, results):
+    """Draw comparison of all tested strategies so far."""
+    if not results:
+        return
+        
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Create a semi-transparent overlay
+    overlay = frame.copy()
+    
+    # Draw a large box for comparison results
+    stats_height = 60 + len(results) * 20
+    top_y = 100
+    
+    cv2.rectangle(overlay, (10, top_y), (frame_width - 10, top_y + stats_height), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+    
+    # Title
+    cv2.putText(frame, "FUSION STRATEGY COMPARISON", 
+               (20, top_y + 25), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+    
+    # Column headers
+    cv2.putText(frame, "Strategy", (20, top_y + 50), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "Avg Latency", (250, top_y + 50), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "Best", (350, top_y + 50), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "P95", (410, top_y + 50), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "MobileNet", (470, top_y + 50), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    cv2.putText(frame, "XGBoost", (550, top_y + 50), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    # Draw results for each strategy
+    y_pos = top_y + 75
+    for i, (strategy, data) in enumerate(results.items()):
+        # Highlight current strategy
+        color = (0, 255, 255) if strategy == AUTO_BENCHMARK_CURRENT else (255, 255, 255)
+        
+        cv2.putText(frame, strategy, (20, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(frame, f"{data.get('avg_latency', 0):.2f}ms", (250, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(frame, f"{data.get('min_latency', 0):.2f}", (350, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(frame, f"{data.get('p95_latency', 0):.2f}", (410, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(frame, f"{data.get('mobilenet_time', 0):.2f}", (470, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(frame, f"{data.get('xgboost_time', 0):.2f}", (550, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        
+        y_pos += 20
+
+
+def draw_benchmark_status(frame):
+    """Draw benchmark status on frame."""
+    if not AUTO_BENCHMARK_MODE:
+        return
+        
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Create a semi-transparent overlay - make this VERY visible
+    overlay = frame.copy()
+    
+    # Draw a bright red border around the entire frame to indicate benchmark mode
+    cv2.rectangle(frame, (0, 0), (frame_width-1, frame_height-1), (0, 0, 255), 3)
+    
+    # Draw a box for benchmark info
+    box_height = 100
+    cv2.rectangle(overlay, (10, 10), (frame_width - 10, box_height + 10), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+    
+    # Title for benchmark section with CURRENT strategy name
+    cv2.putText(frame, f"AUTO BENCHMARK: {AUTO_BENCHMARK_CURRENT}", 
+               (20, 35), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    # Show elapsed time and remaining time
+    elapsed = time.time() - AUTO_BENCHMARK_START_TIME
+    remaining = max(0, AUTO_BENCHMARK_DURATION - elapsed)
+    
+    cv2.putText(frame, f"Time: {elapsed:.1f}s / {AUTO_BENCHMARK_DURATION}s (Remaining: {remaining:.1f}s)", 
+               (20, 60), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    
+    # Show current fusion mode
+    cv2.putText(frame, f"CURRENT MODE: {CURRENT_TEST_MODE}", 
+               (20, 85), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    
+    # Draw progress bar
+    progress = min(1.0, elapsed / AUTO_BENCHMARK_DURATION)
+    bar_width = frame_width - 40
+    progress_width = int(bar_width * progress)
+    
+    cv2.rectangle(frame, 
+                 (20, box_height - 10),
+                 (20 + bar_width, box_height),
+                 (100, 100, 100), 1)
+    
+    cv2.rectangle(frame, 
+                 (20, box_height - 10),
+                 (20 + progress_width, box_height),
+                 (0, 255, 0), -1)
+    
 def draw_latency_stats(frame, stats):
     """Draw minimal latency statistics on frame."""
     frame_height, frame_width = frame.shape[:2]
@@ -1118,13 +1515,21 @@ def draw_fusion_latencies(frame, stats):
             else:
                 trigger_rate = 0.0
             
-            # Calculate complete latency based on strategy
-            strategy = FUSION_STRATEGIES[emotion]
+            # Use the actual strategy being applied from emotion_strategy_map instead of FUSION_STRATEGIES
+            strategy = emotion_strategy_map.get(emotion, "unknown")
             complete_latency = avg_mobilenet
             
-            if strategy != "mobilenet_only" and trigger_rate > 0:
-                complete_latency += trigger_rate * avg_xgboost
-            
+            # Apply appropriate latency calculation based on actual strategy
+            if "xgboost" in strategy.lower() or "weighted" in strategy.lower() or "blend" in strategy.lower():
+                # These strategies always use XGBoost
+                complete_latency += avg_xgboost + decision_time
+            elif "gated" in strategy.lower() and trigger_rate > 0:
+                # Gated strategies only use XGBoost when gate is triggered
+                complete_latency += trigger_rate * avg_xgboost + decision_time
+            else:
+                # MobileNet-only strategies just add decision time
+                complete_latency += decision_time
+                
             emotion_complete_latencies[emotion] = complete_latency
     
     # Draw a box at the bottom of the screen
@@ -1134,9 +1539,9 @@ def draw_fusion_latencies(frame, stats):
     cv2.rectangle(overlay, (10, bottom_y), (frame_width - 10, frame_height - 10), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
     
-    # Show fusion mode and title
-    cv2.putText(frame, f"Full Gated Fusion Analysis", (20, bottom_y + 20), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    # Show fusion mode title with correct current mode
+    cv2.putText(frame, f"Fusion Analysis: {CURRENT_TEST_MODE}", (20, bottom_y + 20), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     
     # Add emotion-specific info
     y_pos = bottom_y + 45
@@ -1144,14 +1549,16 @@ def draw_fusion_latencies(frame, stats):
         if emotion in emotion_complete_latencies:
             complete_latency = emotion_complete_latencies[emotion]
             trigger_pct = (gate_triggered_counts.get(emotion, 0) / max(1, gate_total_counts.get(emotion, 1))) * 100
-            fps = 1000 / complete_latency if complete_latency > 0 else 0
+            
+            # Get actual strategy from map
+            actual_strategy = emotion_strategy_map.get(emotion, "unknown")
             
             cv2.putText(frame, 
-                       f"{emotion[:4]}: {complete_latency:.1f}ms | XGB: {trigger_pct:.1f}% | FPS: {fps:.1f}", 
+                       f"{emotion[:4]}: {complete_latency:.1f}ms | {actual_strategy} | XGB: {trigger_pct:.1f}%", 
                        (20, y_pos), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
             y_pos += 20
-    
+            
     # Show average
     if emotion_complete_latencies:
         avg_latency = sum(emotion_complete_latencies.values()) / len(emotion_complete_latencies)
@@ -1164,7 +1571,9 @@ def draw_fusion_latencies(frame, stats):
 #                      MAIN APPLICATION
 # -------------------------------------------------------------------------
 async def main():
-    global CURRENT_TEST_MODE, fusion_latencies, emotion_latencies
+    global CURRENT_TEST_MODE, fusion_latencies, emotion_latencies, AUTO_BENCHMARK_MODE
+    global AUTO_BENCHMARK_CURRENT, AUTO_BENCHMARK_RESULTS, AUTO_BENCHMARK_START_TIME
+    global emotion_strategy_map
     
     # Initialize models
     print("Loading models...")
@@ -1305,14 +1714,108 @@ async def main():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
             y_pos += 30
         
+        # Handle key presses
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('q'):
+            break
+        elif key == ord('b'):
+            # Toggle auto benchmark mode
+            AUTO_BENCHMARK_MODE = not AUTO_BENCHMARK_MODE
+            if AUTO_BENCHMARK_MODE:
+                print("\n" + "="*50)
+                print("AUTO BENCHMARK MODE ENABLED")
+                print("Will cycle through all fusion strategies")
+                print("Each strategy will run for", AUTO_BENCHMARK_DURATION, "seconds")
+                print("Results will be saved to fusion_benchmark_[timestamp].json")
+                print("="*50 + "\n")
+                AUTO_BENCHMARK_CURRENT = None  # Reset current strategy
+                AUTO_BENCHMARK_START_TIME = time.time()  # Reset timer
+                AUTO_BENCHMARK_RESULTS = {}    # Clear previous results
+                
+                # Reset gate tracking statistics
+                global gate_triggered_counts, gate_total_counts
+                gate_triggered_counts = {emotion: 0 for emotion in EMOTIONS}
+                gate_total_counts = {emotion: 0 for emotion in EMOTIONS}
+                
+                # Update strategy map immediately for display
+                # The first strategy will be all_mobilenet
+                for emotion in EMOTIONS:
+                    emotion_strategy_map[emotion] = "mobilenet_only"
+                
+                # Update benchmark info immediately for display
+                AUTO_BENCHMARK_CURRENT = FUSION_TEST_MODES[0]
+                CURRENT_TEST_MODE = AUTO_BENCHMARK_CURRENT
+                
+                # Print current benchmark status immediately
+                print_benchmark_status()
+            else:
+                print("\n" + "="*50)
+                print("AUTO BENCHMARK MODE DISABLED")
+                print("="*50 + "\n")
+                
+                # Reset emotion strategy map to default when exiting benchmark mode
+                for emotion in EMOTIONS:
+                    emotion_strategy_map[emotion] = FUSION_STRATEGIES.get(emotion, "unknown")
+                
+        # Only allow mode switching when not in auto benchmark mode
+        elif not AUTO_BENCHMARK_MODE and key in [ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7')]:
+            if key == ord('1'):
+                CURRENT_TEST_MODE = "all_mobilenet"
+            elif key == ord('2'):
+                CURRENT_TEST_MODE = "all_xgboost"
+            elif key == ord('3'):
+                CURRENT_TEST_MODE = "gated_fusion"
+            elif key == ord('4'):
+                CURRENT_TEST_MODE = "selective_fusion"
+            elif key == ord('5'):
+                CURRENT_TEST_MODE = "weighted_fusion"
+            elif key == ord('6'):
+                CURRENT_TEST_MODE = "hybrid_balanced_fusion"
+            elif key == ord('7'):
+                CURRENT_TEST_MODE = "mobilenet_confidence_gate"
+            print(f"Switched to test mode: {CURRENT_TEST_MODE}")
+            
+            # Reset the strategy map to reflect the new mode
+            for emotion in EMOTIONS:
+                if CURRENT_TEST_MODE == "all_mobilenet":
+                    emotion_strategy_map[emotion] = "mobilenet_only"
+                elif CURRENT_TEST_MODE == "all_xgboost":
+                    emotion_strategy_map[emotion] = "xgboost_only" 
+                elif CURRENT_TEST_MODE == "gated_fusion":
+                    emotion_strategy_map[emotion] = FUSION_STRATEGIES[emotion]
+                elif CURRENT_TEST_MODE == "selective_fusion":
+                    emotion_strategy_map[emotion] = "mobilenet_only" if emotion == "Engagement" else "xgboost_only"
+                elif CURRENT_TEST_MODE == "weighted_fusion":
+                    emotion_strategy_map[emotion] = "weighted_fusion"
+                elif CURRENT_TEST_MODE == "hybrid_balanced_fusion":
+                    emotion_strategy_map[emotion] = "mobilenet_only" if emotion in ["Engagement", "Boredom", "Frustration"] else "weighted_fusion" 
+                elif CURRENT_TEST_MODE == "mobilenet_confidence_gate":
+                    emotion_strategy_map[emotion] = "confidence_gated"
+            
+            # Reset gate tracking statistics for clean calculations
+            gate_triggered_counts = {emotion: 0 for emotion in EMOTIONS}
+            gate_total_counts = {emotion: 0 for emotion in EMOTIONS}
+                    
+        # Update benchmark strategy
+        update_benchmark_strategy(latency_tracker)
+        
+        # Print benchmark status periodically
+        if AUTO_BENCHMARK_MODE and fps_frame_count == 0:
+            print_benchmark_status()
+        
+        # Draw benchmark results if we have any
+        if AUTO_BENCHMARK_RESULTS:
+            draw_benchmark_comparison(frame, AUTO_BENCHMARK_RESULTS)
+
+        # Draw benchmark status if active - immediately after toggle
+        if AUTO_BENCHMARK_MODE:
+            draw_benchmark_status(frame)
+            
         # Display the resulting frame
         cv2.imshow('Real-time Latency Analysis', frame)
         
         # Print current latency to console periodically
-        if fps_frame_count == 0:
-            print(f"Latency: {stats['best']:.2f} ms (best), {stats['average']:.2f} ms (avg), {stats['worst']:.2f} ms (worst)")
-            
-        # Print fusion latencies to console
         if fps_frame_count == 0:
             print(f"Latency: {stats['best']:.2f} ms (best), {stats['average']:.2f} ms (avg), {stats['worst']:.2f} ms (worst)")
             
@@ -1326,21 +1829,8 @@ async def main():
                 for emotion in EMOTIONS:
                     if emotion in emotion_latencies and len(emotion_latencies[emotion]) > 0:
                         avg_time = sum(emotion_latencies[emotion]) / len(emotion_latencies[emotion])
-                        print(f"  {emotion}: {avg_time:.3f} ms ({FUSION_STRATEGIES[emotion]})")
-        
-        # Break loop on 'q' key press
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-        # Add these keyboard shortcuts to main() function after the existing key handlers
-        if cv2.waitKey(1) & 0xFF == ord('1'):
-            CURRENT_TEST_MODE = "all_mobilenet"
-            print(f"Switched to test mode: {CURRENT_TEST_MODE}")
-        elif cv2.waitKey(1) & 0xFF == ord('2'):
-            CURRENT_TEST_MODE = "all_xgboost"
-            print(f"Switched to test mode: {CURRENT_TEST_MODE}")
-        elif cv2.waitKey(1) & 0xFF == ord('3'):
-            CURRENT_TEST_MODE = "gated_fusion"
-            print(f"Switched to test mode: {CURRENT_TEST_MODE}")
+                        strategy = emotion_strategy_map.get(emotion, "unknown")
+                        print(f"  {emotion}: {avg_time:.3f} ms ({strategy})")
         
         # Cap the display framerate
         await asyncio.sleep(1/DISPLAY_FPS)

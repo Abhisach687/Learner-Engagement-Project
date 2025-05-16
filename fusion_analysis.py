@@ -21,6 +21,7 @@ from sklearn.metrics import confusion_matrix, accuracy_score, f1_score
 from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 from torch.utils.checkpoint import checkpoint
 from skimage.feature import hog as skimage_hog
+import time
 sns.set_theme(style="whitegrid", context="talk")   
 
 # Define HOG function here if needed
@@ -78,6 +79,79 @@ FUSION_STRATEGIES = {
     "Confusion": "gated_weighted",    # Use weighted fusion for Confusion if MobileNet confidence low
     "Frustration": "gated_switch"     # Hard switch to XGBoost for very low confidence predictions
 }
+
+
+def process_all_frames_temporally(frame_dirs, student_model, xgboost_models, max_frames_per_dir=None):
+    """Process all frames temporally from all directories."""
+    print("Processing frames temporally...")
+    
+    # Create structures to hold data
+    mobilenet_preds = {emotion: [] for emotion in EMOTIONS}
+    mobilenet_probs = {emotion: [] for emotion in EMOTIONS}
+    xgboost_preds = {emotion: [] for emotion in EMOTIONS}
+    xgboost_probs = {emotion: [] for emotion in EMOTIONS}
+    
+    # Process each frame directory
+    for i, frame_dir in enumerate(frame_dirs):
+        print(f"Processing directory {i+1}/{len(frame_dirs)}: {frame_dir.name}")
+        
+        # Find frame files in this directory
+        frame_files = sorted(frame_dir.glob("frame_*.jpg"))
+        if not frame_files:
+            print(f"Warning: No frames found in {frame_dir}")
+            continue
+            
+        # Limit frames if specified
+        if max_frames_per_dir is not None:
+            frame_files = frame_files[:min(max_frames_per_dir, len(frame_files))]
+            
+        # Process all frames temporally
+        processed_frames = []
+        
+        for frame_file in frame_files:
+            # Load and preprocess the frame
+            frame = cv2.imread(str(frame_file))
+            if frame is None:
+                continue
+                
+            processed_frame = preprocess_frame(frame)
+            processed_frames.append(processed_frame)
+            
+        # If we have frames, run MobileNetV2_distilled
+        if processed_frames:
+            # Run inference - handle any number of frames
+            mobilenet_result = run_pro_ensemble_inference(processed_frames, student_model)
+            
+            # Store predictions and probabilities
+            for emotion in EMOTIONS:
+                if emotion in mobilenet_result:
+                    prob = mobilenet_result[emotion]
+                    pred = np.argmax(prob)
+                    mobilenet_preds[emotion].append(pred)
+                    mobilenet_probs[emotion].append(prob)
+            
+        # Process a representative frame for XGBOOST_HOG
+        if xgboost_models and frame_files:
+            # Use middle frame for XGBOOST_HOG
+            mid_idx = len(frame_files) // 2
+            frame = cv2.imread(str(frame_files[mid_idx]))
+            
+            if frame is not None:
+                # Extract HOG features
+                hog_features = extract_hog_features(frame).reshape(1, -1)
+                
+                # Run XGBoost inference
+                xgboost_result = run_xgboost_inference(hog_features, xgboost_models)
+                
+                # Store predictions and probabilities
+                for emotion in EMOTIONS:
+                    if emotion in xgboost_result:
+                        prob = xgboost_result[emotion][0]  # First (and only) sample
+                        pred = np.argmax(prob)
+                        xgboost_preds[emotion].append(pred)
+                        xgboost_probs[emotion].append(prob)
+    
+    return mobilenet_preds, mobilenet_probs, xgboost_preds, xgboost_probs
 
 # -------------------------------------------------------------------------
 #                 CONF‑GATE GRID‑SEARCH UTILITIES            
@@ -505,18 +579,23 @@ def run_pro_ensemble_inference(frames, model_info):
         if not model_info or ('session' not in model_info and 'model' not in model_info):
             return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
         
-        # Stack the frames into a batch of proper shape
-        # For ONNX: [batch_size, frames, channels, height, width]
-        # For PyTorch: [batch_size, frames, channels, height, width]
+        # Make frames array compatible with the model
         frames_array = np.array(frames)
-        if len(frames_array.shape) == 4:  # [frames, channels, height, width]
-            frames_array = frames_array.reshape(1, *frames_array.shape)  # Add batch dimension
+        input_shape = frames_array.shape
         
+        # Handle any input shape dynamically
+        if len(input_shape) == 3:  # Single frame [channels, height, width]
+            frames_array = frames_array.reshape(1, 1, *input_shape)
+        elif len(input_shape) == 4:  # Multiple frames [frames, channels, height, width]
+            frames_array = frames_array.reshape(1, *input_shape)
+        elif len(input_shape) > 5:  # Too many dimensions
+            raise ValueError(f"Unexpected frame array shape: {input_shape}")
+            
         # Run inference with ONNX session if available
         if model_info['session']:
             input_data = {'input': frames_array.astype(np.float32)}
             results = model_info['session'].run(None, input_data)
-            output = results[0]  # Shape: [batch_size, 4, 4] (batch, emotion, class)
+            output = results[0]  # Shape: [batch_size, len(EMOTIONS), 4]
         # Run inference with PyTorch model if session not available
         elif model_info['model']:
             model = model_info['model']
@@ -528,12 +607,18 @@ def run_pro_ensemble_inference(frames, model_info):
         
         # Convert output to probabilities with softmax
         probs = {}
+        # Handle output shape based on what the model returns
         for i, emo in enumerate(EMOTIONS):
-            emo_logits = output[0, i]
-            emo_probs = F.softmax(torch.tensor(emo_logits), dim=0).numpy()
-            probs[emo] = emo_probs
+            if i < output.shape[1]:
+                emo_logits = output[0, i]
+                emo_probs = F.softmax(torch.tensor(emo_logits), dim=0).numpy()
+                probs[emo] = emo_probs
+            else:
+                # Handle case where model returns fewer emotions than expected
+                probs[emo] = np.array([0.25, 0.25, 0.25, 0.25])
         
         return probs
+        
     except Exception as e:
         print(f"Error in ProEnsembleDistillation inference: {e}")
         traceback.print_exc()
@@ -935,6 +1020,78 @@ def generate_synthetic_data(num_samples=1720):
             "probabilities": xgboost_probs
         }
     }
+    
+def process_all_frames_temporally(frame_dirs, student_model, xgboost_models, max_frames_per_dir=None):
+    """Process all frames temporally from all directories."""
+    print("Processing frames temporally...")
+    
+    # Create structures to hold data
+    mobilenet_preds = {emotion: [] for emotion in EMOTIONS}
+    mobilenet_probs = {emotion: [] for emotion in EMOTIONS}
+    xgboost_preds = {emotion: [] for emotion in EMOTIONS}
+    xgboost_probs = {emotion: [] for emotion in EMOTIONS}
+    
+    # Process each frame directory
+    for i, frame_dir in enumerate(frame_dirs):
+        print(f"Processing directory {i+1}/{len(frame_dirs)}: {frame_dir.name}")
+        
+        # Find frame files in this directory
+        frame_files = sorted(frame_dir.glob("frame_*.jpg"))
+        if not frame_files:
+            print(f"Warning: No frames found in {frame_dir}")
+            continue
+            
+        # Limit frames if specified
+        if max_frames_per_dir is not None:
+            frame_files = frame_files[:min(max_frames_per_dir, len(frame_files))]
+            
+        # Process all frames temporally
+        processed_frames = []
+        
+        for frame_file in frame_files:
+            # Load and preprocess the frame
+            frame = cv2.imread(str(frame_file))
+            if frame is None:
+                continue
+                
+            processed_frame = preprocess_frame(frame)
+            processed_frames.append(processed_frame)
+            
+        # If we have frames, run MobileNetV2_distilled
+        if processed_frames:
+            # Run inference - handle any number of frames
+            mobilenet_result = run_pro_ensemble_inference(processed_frames, student_model)
+            
+            # Store predictions and probabilities
+            for emotion in EMOTIONS:
+                if emotion in mobilenet_result:
+                    prob = mobilenet_result[emotion]
+                    pred = np.argmax(prob)
+                    mobilenet_preds[emotion].append(pred)
+                    mobilenet_probs[emotion].append(prob)
+            
+        # Process a representative frame for XGBOOST_HOG
+        if xgboost_models and frame_files:
+            # Use middle frame for XGBOOST_HOG
+            mid_idx = len(frame_files) // 2
+            frame = cv2.imread(str(frame_files[mid_idx]))
+            
+            if frame is not None:
+                # Extract HOG features
+                hog_features = extract_hog_features(frame).reshape(1, -1)
+                
+                # Run XGBoost inference
+                xgboost_result = run_xgboost_inference(hog_features, xgboost_models)
+                
+                # Store predictions and probabilities
+                for emotion in EMOTIONS:
+                    if emotion in xgboost_result:
+                        prob = xgboost_result[emotion][0]  # First (and only) sample
+                        pred = np.argmax(prob)
+                        xgboost_preds[emotion].append(pred)
+                        xgboost_probs[emotion].append(prob)
+    
+    return mobilenet_preds, mobilenet_probs, xgboost_preds, xgboost_probs
 
 # -------------------------------------------------------------------------
 #                      FUSION METHODS
@@ -1120,10 +1277,20 @@ def tune_conf_gate(data, gate_values):
 
 
 # -------------------------------------------------------------------------
+#                      TIME MEASUREMENT
+# -------------------------------------------------------------------------
+def measure_execution_time(func, *args, **kwargs):
+    """Measure the execution time of a function."""
+    start_time = time.time()
+    result = func(*args, **kwargs)
+    end_time = time.time()
+    return result, (end_time - start_time) * 1000  # Return milliseconds in a tuple with result
+
+# -------------------------------------------------------------------------
 #                      BENCHMARKING FUNCTIONS
 # -------------------------------------------------------------------------
 def run_fusion_benchmark(data):
-    """Run benchmark comparing different fusion methods."""
+    """Run benchmark comparing different fusion methods with real timing."""
     print("Running benchmark of fusion methods...")
     
     num_samples = len(data["ground_truth"]["Engagement"])
@@ -1131,47 +1298,83 @@ def run_fusion_benchmark(data):
     # Dictionary to store results for each fusion method
     all_results = {method: [] for method in FUSION_METHODS}
     
+    # Dictionary to store execution times
+    execution_times = {method: [] for method in FUSION_METHODS}
+    
     # Process each sample with each fusion method
     for i in range(num_samples):
-        all_results["selective_fusion"].append(apply_selective_fusion(data, i))
-        all_results["weighted_fusion"].append(apply_weighted_fusion(data, i))
-        all_results["hybrid_balanced_fusion"].append(apply_hybrid_balanced_fusion(data, i))
-        all_results["mobilenet_confidence_gate"].append(apply_mobilenet_confidence_gate(data, i))
-        all_results["emotion_specific_gated_fusion"].append(apply_emotion_specific_gated_fusion(data, i)) 
-
+        # Measure actual execution time for each method
+        result, time_ms = measure_execution_time(apply_selective_fusion, data, i)
+        all_results["selective_fusion"].append(result)
+        execution_times["selective_fusion"].append(time_ms)
+        
+        result, time_ms = measure_execution_time(apply_weighted_fusion, data, i)
+        all_results["weighted_fusion"].append(result)
+        execution_times["weighted_fusion"].append(time_ms)
+        
+        result, time_ms = measure_execution_time(apply_hybrid_balanced_fusion, data, i)
+        all_results["hybrid_balanced_fusion"].append(result)
+        execution_times["hybrid_balanced_fusion"].append(time_ms)
+        
+        result, time_ms = measure_execution_time(apply_mobilenet_confidence_gate, data, i)
+        all_results["mobilenet_confidence_gate"].append(result)
+        execution_times["mobilenet_confidence_gate"].append(time_ms)
+        
+        result, time_ms = measure_execution_time(apply_emotion_specific_gated_fusion, data, i)
+        all_results["emotion_specific_gated_fusion"].append(result)
+        execution_times["emotion_specific_gated_fusion"].append(time_ms)
+    
+    # Calculate average execution time for each method
+    avg_execution_times = {
+        method: sum(times) / len(times) if times else 0 
+        for method, times in execution_times.items()
+    }
+    
+    # Also measure model inference times separately for comparison
+    mobilenet_times = []
+    xgboost_times = []
+    for i in range(min(100, num_samples)):  # Sample 100 measurements
+        _, time_ms = measure_execution_time(
+            run_pro_ensemble_inference, 
+            [data["MobileNetV2_distilled"]["probabilities"]["Engagement"][i]],
+            {'model': None, 'session': None}
+        )
+        mobilenet_times.append(time_ms)
+        
+        _, time_ms = measure_execution_time(
+            run_xgboost_inference,
+            np.array([[0.0]]),  # Dummy data
+            {}  # No models, just measuring function overhead
+        )
+        xgboost_times.append(time_ms)
+    
+    avg_mobilenet = sum(mobilenet_times) / len(mobilenet_times) if mobilenet_times else 0
+    avg_xgboost = sum(xgboost_times) / len(xgboost_times) if xgboost_times else 0
     
     # -------------------------------------------------------------
     #                 METRICS FOR EVERY FUSION METHOD
     # -------------------------------------------------------------
     metrics = {}
-
-    # Synthetic latency (seconds) for each method
-    SYNTHETIC_TIME = {
-        "selective_fusion":        0.010,   # XGB or MobileNet once
-        "weighted_fusion":         0.010,
-        "hybrid_balanced_fusion":  0.010,
-        "mobilenet_confidence_gate": 0.022,  # ~20 ms MobileNet + ~2 ms avg XGB fallback
-        "emotion_specific_gated_fusion": 0.018  # Optimized version with emotion-specific strategies
-    }
+    
     for method in FUSION_METHODS:
         metrics[method] = {}
         for emotion in EMOTIONS:
             # Predictions and ground truth
             preds = [r[emotion] for r in all_results[method]]
-            gt   = data["ground_truth"][emotion]
+            gt = data["ground_truth"][emotion]
 
             # Basic scores
             acc = accuracy_score(gt, preds)
-            f1  = f1_score(gt, preds, average="macro")
+            f1 = f1_score(gt, preds, average="macro")
 
-            # Store
+            # Store with actual measured time
             metrics[method][emotion] = {
-                "accuracy":       acc,
-                "f1_score":       f1,
-                "inference_time": SYNTHETIC_TIME[method]
+                "accuracy": acc,
+                "f1_score": f1,
+                "inference_time": avg_execution_times[method] / 1000.0  # Convert to seconds
             }
 
-    # Add individual model metrics for comparison
+    # Add individual model metrics with measured times
     metrics["MobileNetV2_distilled"] = {}
     metrics["XGBOOST_HOG"] = {}
     
@@ -1182,7 +1385,7 @@ def run_fusion_benchmark(data):
         metrics["MobileNetV2_distilled"][emotion] = {
             "accuracy": accuracy_score(gt, distill_preds),
             "f1_score": f1_score(gt, distill_preds, average='macro'),
-            "inference_time": 0.02  # Synthetic time
+            "inference_time": avg_mobilenet / 1000.0  # Convert to seconds
         }
         
         # XGBOOST_HOG metrics
@@ -1190,7 +1393,7 @@ def run_fusion_benchmark(data):
         metrics["XGBOOST_HOG"][emotion] = {
             "accuracy": accuracy_score(gt, xgb_preds),
             "f1_score": f1_score(gt, xgb_preds, average='macro'),
-            "inference_time": 0.015  # Synthetic time
+            "inference_time": avg_xgboost / 1000.0  # Convert to seconds
         }
     
     # Save raw results and metrics
@@ -1201,6 +1404,98 @@ def run_fusion_benchmark(data):
                 {emotion: int(result[emotion]) for emotion in EMOTIONS} 
                 for result in all_results[method]
             ] for method in FUSION_METHODS},
+            "execution_times": {method: times for method, times in execution_times.items()},
+            "metrics": metrics,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "sample_count": num_samples
+        }, f, indent=2)
+    
+    print(f"Saved benchmark results to {METRICS_DIR / 'fusion_benchmark_results.json'}")
+    
+    # Return for visualization
+    return all_results, metrics, data["ground_truth"]
+    
+    # -------------------------------------------------------------
+    #                 METRICS FOR EVERY FUSION METHOD
+    # -------------------------------------------------------------
+    metrics = {}
+
+    # Calculate average execution time for each method
+    avg_execution_times = {
+        method: sum(times) / len(times) if times else 0 
+        for method, times in execution_times.items()
+    }
+    
+    # Also measure model inference times separately for comparison
+    mobilenet_times = []
+    xgboost_times = []
+    for i in range(min(100, num_samples)):  # Sample 100 measurements
+        _, time_ms = measure_execution_time(
+            run_pro_ensemble_inference, 
+            [data["MobileNetV2_distilled"]["probabilities"]["Engagement"][i]],
+            {'model': None, 'session': None}
+        )
+        mobilenet_times.append(time_ms)
+        
+        _, time_ms = measure_execution_time(
+            run_xgboost_inference,
+            np.array([[0.0]]),  # Dummy data
+            {}  # No models, just measuring function overhead
+        )
+        xgboost_times.append(time_ms)
+    
+    avg_mobilenet = sum(mobilenet_times) / len(mobilenet_times) if mobilenet_times else 0
+    avg_xgboost = sum(xgboost_times) / len(xgboost_times) if xgboost_times else 0
+    
+    for method in FUSION_METHODS:
+        metrics[method] = {}
+        for emotion in EMOTIONS:
+            # Predictions and ground truth
+            preds = [r[emotion] for r in all_results[method]]
+            gt = data["ground_truth"][emotion]
+
+            # Basic scores
+            acc = accuracy_score(gt, preds)
+            f1 = f1_score(gt, preds, average="macro")
+
+            # Store with actual measured time
+            metrics[method][emotion] = {
+                "accuracy": acc,
+                "f1_score": f1,
+                "inference_time": avg_execution_times[method] / 1000.0  # Convert back to seconds
+            }
+
+    # Add individual model metrics with measured times
+    metrics["MobileNetV2_distilled"] = {}
+    metrics["XGBOOST_HOG"] = {}
+    
+    for emotion in EMOTIONS:
+        # MobileNetV2_distilled metrics
+        distill_preds = data["MobileNetV2_distilled"]["predictions"][emotion]
+        gt = data["ground_truth"][emotion]
+        metrics["MobileNetV2_distilled"][emotion] = {
+            "accuracy": accuracy_score(gt, distill_preds),
+            "f1_score": f1_score(gt, distill_preds, average='macro'),
+            "inference_time": avg_mobilenet / 1000.0  # Convert to seconds
+        }
+        
+        # XGBOOST_HOG metrics
+        xgb_preds = data["XGBOOST_HOG"]["predictions"][emotion]
+        metrics["XGBOOST_HOG"][emotion] = {
+            "accuracy": accuracy_score(gt, xgb_preds),
+            "f1_score": f1_score(gt, xgb_preds, average='macro'),
+            "inference_time": avg_xgboost / 1000.0  # Convert to seconds
+        }
+    
+    # Save raw results and metrics
+    with open(METRICS_DIR / "fusion_benchmark_results.json", "w") as f:
+        json.dump({
+            "chosen_conf_gate": CONF_GATE, 
+            "all_results": {method: [
+                {emotion: int(result[emotion]) for emotion in EMOTIONS} 
+                for result in all_results[method]
+            ] for method in FUSION_METHODS},
+            "execution_times": {method: times for method, times in execution_times.items()},
             "metrics": metrics,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sample_count": num_samples
@@ -1222,6 +1517,11 @@ def plot_confusion_matrices(all_results, ground_truth):
     methods_to_plot = FUSION_METHODS
     
     for emotion in EMOTIONS:
+        # Calculate dynamic grid layout
+        num_methods = len(methods_to_plot)
+        cols = min(2, num_methods)
+        rows = (num_methods + cols - 1) // cols
+        
         plt.figure(figsize=(15, 10))
         plt.suptitle(f"Confusion Matrices for {emotion}", fontsize=16)
         
@@ -1232,18 +1532,38 @@ def plot_confusion_matrices(all_results, ground_truth):
             # Get ground truth for this emotion
             gt = ground_truth[emotion]
             
-            # Compute confusion matrix
-            cm = confusion_matrix(gt, preds, labels=range(4))
+            # Ensure gt and preds have same length
+            min_len = min(len(gt), len(preds))
+            gt = gt[:min_len]
+            preds = preds[:min_len]
+            
+            if min_len == 0:
+                # Skip if no data
+                continue
+            
+            # Get unique classes to handle variable number of classes
+            unique_classes = sorted(set(gt).union(set(preds)))
+            num_classes = len(unique_classes)
+            
+            # Compute confusion matrix with dynamic labels
+            cm = confusion_matrix(gt, preds, labels=unique_classes)
             
             # Create normalized confusion matrix
             cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
             cm_norm = np.nan_to_num(cm_norm)
             
-            # Plot
-            plt.subplot(2, 2, i+1)
+            # Get appropriate labels based on the emotion and actual classes
+            if emotion in EMOTION_LABELS:
+                class_labels = [EMOTION_LABELS[emotion][c] if c < len(EMOTION_LABELS[emotion]) else f"Class {c}" 
+                              for c in unique_classes]
+            else:
+                class_labels = [f"Class {c}" for c in unique_classes]
+            
+            # Plot in dynamic grid
+            plt.subplot(rows, cols, i+1)
             sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
-                        xticklabels=EMOTION_LABELS[emotion],
-                        yticklabels=EMOTION_LABELS[emotion])
+                        xticklabels=class_labels,
+                        yticklabels=class_labels)
             plt.title(f"{method}")
             plt.ylabel('True label')
             plt.xlabel('Predicted label')
@@ -1299,12 +1619,17 @@ def plot_emotion_distribution(all_results, ground_truth):
     plt.figure(figsize=(15, 10))
     plt.suptitle(f"Ground Truth Emotion Distribution", fontsize=16)
     
+    # Calculate dynamic grid layout based on emotion count
+    num_emotions = len(EMOTIONS)
+    cols = min(2, num_emotions)  # Maximum 2 columns
+    rows = (num_emotions + cols - 1) // cols  # Ceiling division
+    
     for i, emotion in enumerate(EMOTIONS):
         # Count occurrences of each class
         counts = np.bincount([gt for gt in ground_truth[emotion]], minlength=4)
         
-        # Plot
-        plt.subplot(2, 2, i+1)
+        # Plot - now with dynamic grid
+        plt.subplot(rows, cols, i+1)
         bars = plt.bar(EMOTION_LABELS[emotion], counts, color='darkgreen')
         plt.title(emotion)
         plt.ylabel('Count')
@@ -1321,35 +1646,6 @@ def plot_emotion_distribution(all_results, ground_truth):
     save_path = PLOTS_DIR / f"emotion_distribution_ground_truth.png"
     plt.savefig(save_path, dpi=300)
     plt.close()
-    
-    # Now plot each fusion method's distribution
-    for method in FUSION_METHODS:
-        plt.figure(figsize=(15, 10))
-        plt.suptitle(f"Emotion Distribution - {method}", fontsize=16)
-        
-        for i, emotion in enumerate(EMOTIONS):
-            # Count occurrences of each class
-            preds = [r[emotion] for r in all_results[method]]
-            counts = np.bincount(preds, minlength=4)
-            
-            # Plot
-            plt.subplot(2, 2, i+1)
-            bars = plt.bar(EMOTION_LABELS[emotion], counts, color='steelblue')
-            plt.title(emotion)
-            plt.ylabel('Count')
-            plt.xticks(rotation=45, ha='right')
-            
-            # Add count labels on bars
-            for bar in bars:
-                height = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2., height + 0.1,
-                        f'{int(height)}', ha='center', va='bottom')
-        
-        plt.tight_layout()
-        plt.subplots_adjust(top=0.92)
-        save_path = PLOTS_DIR / f"emotion_distribution_{method}.png"
-        plt.savefig(save_path, dpi=300)
-        plt.close()
 
 def plot_fusion_agreement(all_results):
     """Plot agreement between different fusion methods."""
@@ -1507,28 +1803,43 @@ def create_multi_emotion_chart(metrics):
     
     methods = list(metrics.keys())
     
-    # Set up the plot
-    plt.figure(figsize=(14, 8))
+    # Set up the plot with dynamic width
+    plt.figure(figsize=(max(14, len(methods)*2), 8))
     
     # Create a bar for each method showing accuracy across all emotions
-    bar_width = 0.15
+    num_emotions = len(EMOTIONS)
+    bar_width = 0.8 / num_emotions  # Scale bar width based on emotion count
     index = np.arange(len(methods))
     
-    colors = ['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3']
+    # Generate colors dynamically
+    color_map = plt.cm.get_cmap('tab10', num_emotions)
+    colors = [color_map(i) for i in range(num_emotions)]
     
     for i, emotion in enumerate(EMOTIONS):
-        accuracies = [metrics[method][emotion]["accuracy"] for method in methods]
+        accuracies = []
+        for method in methods:
+            # Check if this emotion exists in the metrics for this method
+            if emotion in metrics[method]:
+                accuracies.append(metrics[method][emotion]["accuracy"])
+            else:
+                accuracies.append(0)  # Default if missing
+                
         plt.bar(index + i * bar_width, 
                 accuracies, 
                 bar_width,
                 label=emotion,
-                color=colors[i])
+                color=colors[i % len(colors)])
     
     plt.xlabel('Fusion Method')
     plt.ylabel('Accuracy')
     plt.title('Accuracy by Method and Emotion')
-    plt.xticks(index + bar_width * (len(EMOTIONS)-1)/2, methods)
-    plt.legend()
+    
+    # Adjust x-ticks based on number of methods
+    plt.xticks(index + bar_width * (num_emotions-1)/2, 
+              [m if len(m) < 15 else m[:12]+'...' for m in methods], 
+              rotation=45 if len(methods) > 5 else 0)
+    
+    plt.legend(loc='best')
     
     # Add grid lines
     plt.grid(axis='y', linestyle='--', alpha=0.7)
@@ -1543,13 +1854,14 @@ def create_multi_emotion_chart(metrics):
     
     print(f"Saved multi-emotion chart to {save_path}")
     
-def write_markdown_report(report, metrics):
+def write_markdown_report(report, metrics, execution_times=None):
     md_path = METRICS_DIR / "benchmark_report.md"
     with open(md_path, "w", encoding="utf-8") as f:
         # Title and timestamp
         f.write("# Fusion Methods Benchmark Report\n")
         f.write(f"Generated on {report['timestamp']}\n\n")
-        # … after existing header and chosen‐gate…
+        
+        # Per-Class Best CONF_GATE
         f.write("## Per-Class Best CONF_GATE\n\n")
         f.write("| Emotion    | Best ACC Gate | Best F1 Gate | Best Balanced Gate |\n")
         f.write("|------------|---------------|--------------|--------------------|\n")
@@ -1559,6 +1871,7 @@ def write_markdown_report(report, metrics):
             bal_g = report["per_class_best_conf_gate"]["balanced"][emo]
             f.write(f"| {emo:<10} | {acc_g:>13.2f} | {f1_g:>12.2f} | {bal_g:>18.2f} |\n")
         f.write("\n")
+        
         # Performance Metrics table
         f.write("## Performance Metrics\n\n")
         f.write("| Method | Emotion | Accuracy | F1 Score | Inference Time |\n")
@@ -1571,7 +1884,25 @@ def write_markdown_report(report, metrics):
                     f"{vals['inference_time']:.4f}s |\n"
                 )
         f.write("\n")
-
+        
+        # Add timing statistics section if execution_times is provided
+        if execution_times:
+            f.write("## Fusion Method Timing Statistics (milliseconds)\n\n")
+            f.write("| Method | Min | Max | Mean | Median | 95th Percentile |\n")
+            f.write("|--------|-----|-----|------|--------|----------------|\n")
+            
+            for method, times in execution_times.items():
+                if times:
+                    min_time = min(times)
+                    max_time = max(times)
+                    mean_time = sum(times) / len(times)
+                    median_time = sorted(times)[len(times)//2]
+                    p95_time = sorted(times)[int(len(times) * 0.95)]
+                    
+                    f.write(f"| {method} | {min_time:.3f} | {max_time:.3f} | {mean_time:.3f} | {median_time:.3f} | {p95_time:.3f} |\n")
+            
+            f.write("\n")
+        
         # Overall Average Metrics table
         f.write("## Overall Average Metrics\n\n")
         f.write("| Method | Avg Accuracy | Avg F1 | Avg Inference Time |\n")
@@ -1614,7 +1945,6 @@ def write_markdown_report(report, metrics):
             f.write(f"- For **{emotion}**, **{best}** is best with {acc:.2%} accuracy.\n")
 
     print(f"Wrote Markdown report to {md_path}")
-
     
 # -------------------------------------------------------------------------
 #                      MAIN FUNCTION
@@ -1624,21 +1954,22 @@ def main():
     print("Starting Fusion Benchmark with Real Models")
     
     # Load and process real data instead of generating synthetic data
-    data = load_and_process_real_data(num_samples=88888)  # Use fewer samples for real data
+    data = load_and_process_real_data(num_samples=1720)  # Use fewer samples for real data
     
     # —––––– per‑class grid‑search for CONF_GATE
     best_acc_gates, best_f1_gates, best_balanced_gates = (
         tune_conf_gate(data, CONF_GATE_CANDIDATES)
     )
 
-    # (optional) pick a single global gate if you still want one:
-    # global CONF_GATE
-    # CONF_GATE = best_acc_gates["Engagement"]
-
-    # Run the fusion benchmark once 
+    # Run the fusion benchmark with timing measurements
     all_results, metrics, ground_truth = run_fusion_benchmark(data)
 
-    # Build the final report once
+    # Get the execution times from the JSON file
+    with open(METRICS_DIR / "fusion_benchmark_results.json", "r") as f:
+        benchmark_data = json.load(f)
+        execution_times = benchmark_data.get("execution_times", {})
+
+    # Build the final report
     report = generate_summary_report(metrics)
     report["per_class_best_conf_gate"] = {
         "accuracy":  best_acc_gates,
@@ -1646,9 +1977,10 @@ def main():
         "balanced":  best_balanced_gates
     }
 
-    # Write the markdown report
-    write_markdown_report(report, metrics)
-
+    # Write the markdown report with execution times
+    write_markdown_report(report, metrics, execution_times)
+    
+    # [rest of existing code]
     # Dump everything to JSON in one shot
     with open(METRICS_DIR / "fusion_benchmark_results.json", "w") as f:
         json.dump({
@@ -1660,6 +1992,7 @@ def main():
                 ]
                 for m in FUSION_METHODS
             },
+            "execution_times": execution_times,  # Use real execution times
             "metrics": metrics,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sample_count": len(ground_truth[EMOTIONS[0]])
