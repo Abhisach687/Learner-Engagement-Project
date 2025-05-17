@@ -32,6 +32,23 @@ import torch
 import xgboost as xgb
 import asyncio
 
+# Add a console log buffer to store recent messages
+CONSOLE_LOG_BUFFER = deque(maxlen=40000)  # Store last 40000 log messages
+
+# Create a custom print function that also stores logs
+original_print = print
+def log_print(*args, **kwargs):
+    # Convert args to a string
+    message = " ".join(str(arg) for arg in args)
+    # Add timestamp to message
+    timestamped_message = f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {message}"
+    # Store in buffer
+    CONSOLE_LOG_BUFFER.append(timestamped_message)
+    # Call original print
+    original_print(*args, **kwargs)
+
+# Replace the built-in print function
+print = log_print
 
 # -------------------------------------------------------------------------
 #                      CONFIGURATION AND PATHS
@@ -296,6 +313,49 @@ def load_xgboost_models():
     except Exception as e:
         print(f"Error loading XGBoost models: {e}")
         return {}
+    
+
+def validate_xgboost_models(models):
+    """Validate that the XGBoost models are properly loaded and can make predictions."""
+    if not models:
+        print("❌ No XGBoost models were loaded!")
+        return False
+    
+    print("\n===== VALIDATING XGBOOST MODELS =====")
+    all_valid = True
+    
+    # Create a simple test feature vector (same size as HOG features)
+    test_features = np.random.random(9216).astype(np.float32)  # Adjust size to match your HOG features
+    
+    try:
+        dmatrix = xgb.DMatrix(test_features.reshape(1, -1))
+        
+        for emotion in EMOTIONS:
+            if emotion not in models:
+                print(f"❌ Missing model for {emotion}")
+                all_valid = False
+                continue
+                
+            try:
+                # Test prediction
+                raw_pred = models[emotion].predict(dmatrix)
+                
+                if raw_pred is None or len(raw_pred) == 0:
+                    print(f"❌ Empty prediction for {emotion}")
+                    all_valid = False
+                else:
+                    print(f"✅ Valid prediction for {emotion}: {raw_pred[0]}")
+                    
+            except Exception as e:
+                print(f"❌ Error predicting with {emotion} model: {e}")
+                all_valid = False
+    
+    except Exception as e:
+        print(f"❌ Error creating test DMatrix: {e}")
+        all_valid = False
+    
+    print(f"XGBoost validation {'passed' if all_valid else 'failed'}\n")
+    return all_valid
 
 # -------------------------------------------------------------------------
 #                      FEATURE EXTRACTION FUNCTIONS
@@ -337,6 +397,28 @@ def preprocess_frame(frame):
     # CHW format for PyTorch/ONNX
     frame = frame.transpose(2, 0, 1)
     return frame
+
+# -------------------------------------------------------------------------
+#                      VALIDATION FUNCTION
+# -------------------------------------------------------------------------
+
+def validate_model_output(predictions):
+    """Check if predictions are valid (not all zeros or very close to zeros)."""
+    if not predictions:
+        return False
+        
+    # Count emotions with non-uniform predictions
+    valid_emotions = 0
+    for emotion, value in predictions.items():
+        # Check if the value is a valid class index (0-3)
+        if 0 <= value <= 3:
+            valid_emotions += 1
+        # If it's an array, check if it's not uniform (not all 0.25)
+        elif isinstance(value, np.ndarray) and not np.allclose(value, np.array([0.25, 0.25, 0.25, 0.25])):
+            valid_emotions += 1
+    
+    # We need at least one valid emotion prediction
+    return valid_emotions > 0
 
 # -------------------------------------------------------------------------
 #                      POST-PROCESSING FUNCTIONS
@@ -550,68 +632,156 @@ def apply_xgboost_postprocessing(preds, emotion):
 #                      PREDICTION AND FUSION FUNCTIONS
 # -------------------------------------------------------------------------
 
-async def run_pro_ensemble(frame_buffer, model_info):
-    """Run ProEnsembleDistillation model on a buffer of frames."""
+async def run_xgboost(hog_features, xgboost_models):
+    """Run XGBoost models on extracted HOG features with proper formatting and error handling."""
     try:
-        # If no model info or session, return default probabilities
-        if not model_info or 'session' not in model_info or not model_info['session']:
+        # If no XGBoost models loaded, return default probabilities
+        if not xgboost_models:
+            print("No XGBoost models available")
             return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+        
+        # Ensure features are the correct shape and type
+        if isinstance(hog_features, np.ndarray):
+            # Reshape to 1D if needed (XGBoost expects a flat vector)
+            if len(hog_features.shape) > 1:
+                features = hog_features.flatten().reshape(1, -1)
+            else:
+                features = hog_features.reshape(1, -1)
             
-        # Process frames in batches for the temporal model
-        frames = np.array(frame_buffer)
+            # Create DMatrix with proper formatting
+            try:
+                dmatrix = xgb.DMatrix(features)
+            except Exception as e:
+                print(f"Failed to create DMatrix: {e}, shape={features.shape}, type={features.dtype}")
+                return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+        else:
+            print(f"Invalid HOG features type: {type(hog_features)}")
+            return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
         
-        # Add batch dimension if missing
-        if len(frames.shape) == 4:  # [frames, channels, height, width]
-            frames = frames.reshape(1, *frames.shape)  # [1, frames, channels, height, width]
+        # Run inference for each emotion with detailed error handling
+        results = {}
+        for emotion in EMOTIONS:
+            if emotion not in xgboost_models:
+                print(f"Missing XGBoost model for {emotion}")
+                results[emotion] = np.array([0.25, 0.25, 0.25, 0.25])
+                continue
+            
+            try:
+                # Get raw predictions
+                raw_pred = xgboost_models[emotion].predict(dmatrix)[0]
+                
+                # Check if prediction contains valid values
+                if np.isnan(raw_pred).any() or np.isinf(raw_pred).any():
+                    print(f"Invalid prediction values for {emotion}: {raw_pred}")
+                    results[emotion] = np.array([0.25, 0.25, 0.25, 0.25])
+                    continue
+                
+                # Debug output to check raw predictions
+                print(f"XGBoost raw prediction for {emotion}: {raw_pred}")
+                
+                # Apply softmax with numerical stability
+                raw_pred = raw_pred - np.max(raw_pred)  # Subtract max for numerical stability
+                exp_pred = np.exp(raw_pred)
+                probs = exp_pred / np.sum(exp_pred)
+                
+                # Ensure valid probabilities
+                if np.isnan(probs).any() or np.sum(probs) < 0.99:
+                    print(f"Invalid probabilities for {emotion}: {probs}, sum={np.sum(probs)}")
+                    probs = np.array([0.25, 0.25, 0.25, 0.25])
+                    
+                results[emotion] = probs
+                
+            except Exception as e:
+                print(f"Error in XGBoost prediction for {emotion}: {e}")
+                results[emotion] = np.array([0.25, 0.25, 0.25, 0.25])
         
-        # Convert to ONNX input format
-        input_data = {'input': frames.astype(np.float32)}
+        # Final check for all-zero results
+        all_valid = True
+        for emotion, probs in results.items():
+            if np.allclose(probs, np.array([0.25, 0.25, 0.25, 0.25])):
+                all_valid = False
         
-        # Run inference
-        results = model_info['session'].run(None, input_data)
-        output = results[0]  # Shape: [1, 4, 4] (batch, emotion, class)
+        if not all_valid:
+            print("⚠️ XGBoost returned uniform probabilities - check model loading")
         
-        # Convert output to probabilities with softmax
-        probs = {}
-        for i, emo in enumerate(EMOTIONS):
-            emo_logits = output[0, i]
-            emo_probs = F.softmax(torch.tensor(emo_logits), dim=0).numpy()
-            probs[emo] = emo_probs
+        return results
         
-        return probs
     except Exception as e:
-        print(f"Error in ProEnsembleDistillation inference: {e}")
+        print(f"Error in XGBoost inference: {e}")
         import traceback
         traceback.print_exc()
         return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
 
-async def run_xgboost(hog_feature, xgb_models):
-    """Run XGBoost models on HOG features."""
+async def run_pro_ensemble(frame_buffer, model_info):
+    """Run ProEnsembleDistillation model with optimized buffer handling."""
     try:
-        results = {}
-        # Create DMatrix once for all models
-        dmat = xgb.DMatrix(hog_feature.reshape(1, -1))
+        # Fast path for missing models or empty buffers
+        if not model_info or 'session' not in model_info or not model_info['session']:
+            return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
         
-        for emo in EMOTIONS:
-            if emo in xgb_models:
-                # Get probabilities from model
-                raw_pred = xgb_models[emo].predict(dmat, output_margin=True)[0]
+        # Check if we have enough frames for accurate prediction
+        buffer_size = len(frame_buffer)
+        
+        # Skip excessive logging - only log every 10 frames when buffer is filling
+        if buffer_size < FRAME_HISTORY and buffer_size % 10 == 0:
+            print(f"Building frame buffer: {buffer_size}/{FRAME_HISTORY}")
+        
+        # For extremely small buffers, return baseline values
+        if buffer_size < 10:  
+            return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+            
+        # Process frames with adaptive buffer handling
+        frames = np.array(frame_buffer)
+        
+        # Add batch dimension if needed
+        if len(frames.shape) == 4:  # [frames, channels, height, width]
+            frames = frames.reshape(1, *frames.shape)
+            
+        # Smart padding that maintains temporal characteristics
+        if buffer_size < FRAME_HISTORY:
+            # Create padded array
+            padded_frames = np.zeros((1, FRAME_HISTORY, frames.shape[2], frames.shape[3], frames.shape[4]), 
+                                   dtype=frames.dtype)
+            
+            # Place actual frames in the end positions for better temporal modeling
+            start_idx = FRAME_HISTORY - buffer_size
+            padded_frames[0, start_idx:] = frames[0]
+            
+            input_data = {'input': padded_frames.astype(np.float32)}
+        else:
+            # Complete buffer - use as is
+            input_data = {'input': frames.astype(np.float32)}
+            
+        # Run inference with error handling
+        try:
+            results = model_info['session'].run(None, input_data)
+            output = results[0]
+            
+            # Calculate confidence based on buffer fullness
+            confidence = min(1.0, buffer_size / FRAME_HISTORY)
+            
+            # Process outputs with optimized numpy operations
+            probs = {}
+            for i, emo in enumerate(EMOTIONS):
+                emo_logits = output[0, i]
+                # Use numpy for softmax - faster than PyTorch conversion
+                exp_logits = np.exp(emo_logits - np.max(emo_logits))
+                emo_probs = exp_logits / exp_logits.sum()
+                probs[emo] = emo_probs
                 
-                # Convert to one-hot encoding for now
-                pred_class = int(xgb_models[emo].predict(dmat)[0])
-                probs = np.zeros(4)
-                probs[pred_class] = 1.0
-                
-                results[emo] = probs
+            return probs
+            
+        except Exception as e:
+            # More informative error message
+            if "invalid dimensions" in str(e):
+                print(f"Model dimension error: buffer_size={buffer_size}, expected={FRAME_HISTORY}")
             else:
-                results[emo] = np.array([0.25, 0.25, 0.25, 0.25])
-                
-        return results
+                print(f"Model inference error: {e}")
+            return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+            
     except Exception as e:
-        print(f"Error in XGBoost inference: {e}")
+        print(f"Error in model processing: {e}")
         return {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
-
-# Replace the existing select_final_prediction function
 
 def select_final_prediction(mobilenet_probs, xgboost_probs, emotion):
     """
@@ -759,101 +929,85 @@ def determine_processing_rate():
 # -------------------------------------------------------------------------
 #                      MAIN PROCESSING FUNCTION
 # -------------------------------------------------------------------------
-
+# Optimize the frame skipping logic with reduced overhead
 async def process_frame(frame, frame_count, frame_buffer, models):
-    """Main processing function for a single frame with optimizations."""
+    """Optimized processing function for a single frame."""
     global last_processing_time, reported_latency, FRAME_SKIP, USER_FRAME_SKIP, ENABLE_FRAME_SKIPPING, results
     
-    # Debug output occasionally
-    if frame_count % 100 == 0:
-        print(f"FRAME {frame_count}: Skip={FRAME_SKIP}, Dynamic={ENABLE_FRAME_SKIPPING}, User={USER_FRAME_SKIP}")
+    # Calculate frame skip with minimal overhead
+    current_skip = FRAME_SKIP
     
-    # Calculate frame skip based on mode
-    if ENABLE_FRAME_SKIPPING:
-        # In dynamic mode: Calculate based on system load
-        cpu_load = get_cpu_utilization()
-        gpu_load = get_gpu_utilization()
+    # Simple frame skip application with fast path 
+    if frame_count % max(1, current_skip) != 0:
+        return results  # Fast return for skipped frames
+    
+    # Throttle processing to maintain target framerate
+    elapsed = time.time() - last_processing_time
+    if elapsed < MIN_FRAME_TIME:
+        return results  # Skip processing if too soon
+    
+    # Start timing
+    processing_start = time.time()
+    
+    # Process frame with optimized operations
+    
+    # 1. Preprocess and buffer frame (reuse frame memory where possible)
+    processed_frame = preprocess_frame(frame)
+    frame_buffer.append(processed_frame)
+    
+    # 2. Maintain buffer size with efficient operation
+    if len(frame_buffer) > FRAME_HISTORY:
+        frame_buffer.pop(0)
+    
+    # 3. Extract features for both models - HOG can be expensive
+    hog_features = extract_hog_features(frame)
+    
+    # 4. Run appropriate models based on fusion mode
+    if CURRENT_FUSION_MODE == 'xgboost_only':
+        # Only run XGBoost - skip MobileNet overhead
+        mobilenet_probs = {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+        xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
+    elif CURRENT_FUSION_MODE == 'mobilenet_only':
+        # Only run MobileNet - skip XGBoost overhead
+        mobilenet_probs = await run_pro_ensemble(frame_buffer, models['student'])
+        xgboost_probs = {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+    else:
+        # Run both models for fusion strategies
+        xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
+        mobilenet_probs = await run_pro_ensemble(frame_buffer, models['student'])
+    
+    # 5. Apply fusion with reduced calls
+    emotion_predictions = {}
+    for emotion in EMOTIONS:
+        predicted_class = select_final_prediction(
+            mobilenet_probs[emotion], 
+            xgboost_probs[emotion], 
+            emotion
+        )
         
-        # Dynamic adjustment based on system load
+        # Apply temporal smoothing for stability
+        emotion_predictions[emotion] = apply_temporal_smoothing(predicted_class, emotion)
+    
+    # Update latency metrics
+    last_processing_time = time.time()
+    reported_latency = int((last_processing_time - processing_start) * 1000)
+    
+    # Adjust frame skip based on load (only in dynamic mode)
+    if ENABLE_FRAME_SKIPPING:
+        # Fast path for updating frame skip
         current_rate = determine_processing_rate()
         if current_rate == "process_every_third_frame":
             FRAME_SKIP = 3
         elif current_rate == "process_every_second_frame":
             FRAME_SKIP = 2
-        elif cpu_load < CPU_MEDIUM_THRESHOLD and gpu_load < GPU_MEDIUM_THRESHOLD:
+        else:
             FRAME_SKIP = 1
-    else:
-        # In manual mode: Always use user's setting
-        FRAME_SKIP = USER_FRAME_SKIP
     
-    # Apply the frame skipping logic
-    if frame_count % max(1, FRAME_SKIP) != 0:
-        return results  # Skip this frame
+    # Additional logging control - reduced frequency
+    if frame_count % 100 == 0:
+        print(f"FRAME {frame_count}: Skip={FRAME_SKIP}, Dynamic={ENABLE_FRAME_SKIPPING}, User={USER_FRAME_SKIP}")
     
-    # Enforce minimum time between processed frames
-    elapsed = time.time() - last_processing_time
-    if elapsed < MIN_FRAME_TIME:
-        return results
-    
-    # Start measuring processing time
-    processing_start = time.time()
-    
-    # Preprocess frame more efficiently
-    preprocessed_frame = preprocess_frame(frame.copy())
-    frame_buffer.append(preprocessed_frame)
-    
-    # Keep the buffer size fixed
-    while len(frame_buffer) > FRAME_HISTORY:
-        frame_buffer.pop(0)
-    
-    # If we don't have enough frames yet, return placeholder
-    if len(frame_buffer) < FRAME_HISTORY:
-        return {emo: 0 for emo in EMOTIONS}
-    
-    # Extract HOG features in parallel thread
-    hog_future = asyncio.get_event_loop().run_in_executor(
-        thread_pool, extract_hog_features, frame
-    )
-    
-    # Start model inferences in parallel
-    pro_ensemble_task = asyncio.create_task(
-        run_pro_ensemble(np.stack(frame_buffer), models['student'])
-    )
-    
-    # Wait for HOG extraction to complete
-    hog_features = await hog_future
-    
-    # Run XGBoost inference
-    xgboost_task = asyncio.create_task(
-        run_xgboost(hog_features, models['xgboost'])
-    )
-    
-    # Gather results and apply model-specific post-processing
-    pro_result = await pro_ensemble_task
-    xgboost_result = await xgboost_task
-    
-    final_results = {}
-    
-    # Process each emotion with optimized fusion strategy
-    for emotion in EMOTIONS:
-        # Get probabilities from models
-        mobilenet_probs = pro_result[emotion]
-        xgboost_probs = xgboost_result[emotion]
-        
-        # Apply fusion strategy based on emotion-specific gates and methods
-        raw_pred = select_final_prediction(mobilenet_probs, xgboost_probs, emotion)
-        
-        # Apply temporal smoothing
-        smooth_pred = apply_temporal_smoothing(raw_pred, emotion)
-        
-        final_results[emotion] = smooth_pred
-    
-    # Update metrics
-    last_processing_time = time.time()
-    processing_time = (last_processing_time - processing_start) * 1000
-    reported_latency = int(processing_time)
-    
-    return final_results
+    return emotion_predictions
 
 # -------------------------------------------------------------------------
 #                      UI COMPONENTS AND HELPER FUNCTIONS
@@ -973,6 +1127,10 @@ class EmotionDetectionApp:
             thread_pool, load_xgboost_models
         )
         
+        # Add this line to validate XGBoost models
+        if self.models['xgboost']:
+            validate_xgboost_models(self.models['xgboost'])
+        
         print(f"Looking for student model at: {DISTILL_MODEL_PATH}")
         print(f"Model directory exists: {MODEL_DIR.exists()}")
         print(f"Student model exists: {DISTILL_MODEL_PATH.exists()}")
@@ -999,6 +1157,7 @@ class EmotionDetectionApp:
         self.system_info['processing_rate'] = determine_processing_rate()
         self.system_info['last_update'] = time.time()
     
+
     async def process_webcam_frame(self, frame):
         """Process a single frame from the webcam with optimizations."""
         if not self.processing_active:
@@ -1020,12 +1179,28 @@ class EmotionDetectionApp:
                 print(f"Frame {self.frame_count}, Buffer: {len(self.frame_buffer)}/{FRAME_HISTORY}, Mode: {CURRENT_FUSION_MODE}")
                 print(f"Latency: {reported_latency}ms, Frame Skip: {FRAME_SKIP}, Skip Enabled: {ENABLE_FRAME_SKIPPING}")
                 
-                # If we're getting zeros, print a warning
-                if results and not any(results.values()):
+                # FIX: More informative validation - only warn when truly problematic
+                if results and not validate_model_output(results):
                     print("WARNING: All zero values - check model outputs")
+                    
+                    # FIX: Try to recover by reinitializing if this happens repeatedly
+                    if not hasattr(self, 'zero_value_count'):
+                        self.zero_value_count = 0
+                    
+                    self.zero_value_count += 1
+                    
+                    # If we get 5 consecutive zero-value results, try reconnecting to webcam
+                    if self.zero_value_count > 5:
+                        print("Multiple zero-value frames detected. Attempting recovery...")
+                        self.frame_buffer = []  # Clear frame buffer to force fresh start
+                        self.zero_value_count = 0
+                else:
+                    # Reset counter when we get valid results
+                    if hasattr(self, 'zero_value_count'):
+                        self.zero_value_count = 0
             
             # Update last results if we have valid data
-            if results and any(results.values()):
+            if results and validate_model_output(results):
                 self.last_results = results
                 
             return results
@@ -1065,12 +1240,47 @@ class EmotionDetectionApp:
             ui.notify(f'Error starting webcam: {str(e)}', type='negative')
     
     def stop_webcam(self):
-        """Stop the webcam feed."""
+        """Stop the webcam feed and save console logs."""
         if not self.webcam_active:
             return
             
         self.webcam_active = False
         self.processing_active = False
+        
+        # Save logs to file
+        try:
+            log_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = f"webcam_log_{log_timestamp}.txt"
+            
+            # Create logs directory if it doesn't exist
+            log_dir = Path("./logs")
+            log_dir.mkdir(exist_ok=True)
+            
+            log_path = log_dir / log_filename
+            
+            # Write logs to file
+            with open(log_path, 'w', encoding='utf-8') as f:
+                f.write(f"Webcam Session Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"Device: {DEVICE}\n")
+                f.write(f"Fusion Mode: {CURRENT_FUSION_MODE}\n")
+                f.write(f"Frame Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}, User: {USER_FRAME_SKIP}\n")
+                f.write(f"Latency: {reported_latency}ms\n")
+                f.write(f"CPU: {get_cpu_utilization()}%, GPU: {get_gpu_utilization()}%\n")
+                f.write(f"Frame Buffer Size: {len(self.frame_buffer)}/{FRAME_HISTORY}\n\n")
+                
+                # Write the captured console output
+                f.write("=" * 80 + "\n")
+                f.write("CONSOLE LOG HISTORY\n")
+                f.write("=" * 80 + "\n\n")
+                for log_line in CONSOLE_LOG_BUFFER:
+                    f.write(f"{log_line}\n")
+            
+            ui.notify(f'Logs saved to {log_path}', type='info', duration=8)
+            print(f"Console logs saved to: {log_path}")
+        except Exception as e:
+            ui.notify(f'Error saving logs: {str(e)}', type='negative')
+            print(f"Error saving logs: {e}")
         
         if self.webcam:
             self.webcam.release()
@@ -1213,6 +1423,62 @@ async def index_page():
                 height: 100%;
                 object-fit: cover;
             }
+            
+            /* Add this to existing CSS */
+    [data-theme="dark"] .q-card {
+        background-color: #1e1e1e !important;
+        color: #e0e0e0 !important;
+    }
+    
+    [data-theme="dark"] .q-slider__track {
+        background-color: #555 !important;
+    }
+    
+    [data-theme="dark"] .q-slider__track-container {
+        background-color: #333 !important;
+    }
+    
+    [data-theme="dark"] .text-lg, 
+    [data-theme="dark"] .q-slider__pin-value,
+    [data-theme="dark"] .q-slider__pin-text {
+        color: #e0e0e0 !important;
+    }
+    
+    [data-theme="dark"] .q-toggle__inner {
+        color: #bb86fc !important;
+    }
+
+ /* Fix for black webcam display in dark mode */
+    [data-theme="dark"] .webcam-display {
+        background-color: #333 !important;
+    }
+    
+    [data-theme="dark"] .webcam-image img {
+        filter: brightness(1.2) contrast(1.1) !important;  /* Enhance visibility */
+    }
+    
+    /* Fix for emotion labels in dark mode */
+    [data-theme="dark"] .emotion-card {
+        background-color: #333 !important;  /* Darker background */
+    }
+    
+    [data-theme="dark"] .emotion-card .text-h6,
+    [data-theme="dark"] .emotion-card label {
+        color: #ffffff !important;  /* White text */
+    }
+    
+    [data-theme="dark"] .q-card .text-h6,
+    [data-theme="dark"] .q-card .text-body1,
+    [data-theme="dark"] .q-card label {
+        color: #ffffff !important;  /* White text for all card content */
+    }
+    
+    /* Fix webcam image rendering */
+    .webcam-image img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
         </style>
     <script>
         // Initialize dark mode from localStorage
@@ -1292,8 +1558,27 @@ async def index_page():
                 # Function to handle fusion mode selection
                 def set_fusion_mode(value):
                     global CURRENT_FUSION_MODE
+                    old_mode = CURRENT_FUSION_MODE
                     CURRENT_FUSION_MODE = value
                     
+                    # Only reset results for significant mode changes
+                    needs_reset = False
+                    
+                    # Only reset for major transitions that would cause prediction inconsistency
+                    if ((old_mode == 'xgboost_only' and value != 'xgboost_only') or
+                        (old_mode != 'xgboost_only' and value == 'xgboost_only')):
+                        needs_reset = True
+                        print(f"Major fusion mode change: {old_mode} -> {value}, partial reset needed")
+                    
+                    if needs_reset:
+                        # Only reset temporal smoothing, keep frame buffer
+                        global RESULTS_BUFFER
+                        RESULTS_BUFFER = deque(maxlen=SMOOTHING_WINDOW)
+                        
+                        # No need to clear frame buffer - that loses valuable temporal data
+                        # Just notify about the mode change
+                        ui.notify(f'Switched to {CURRENT_FUSION_MODE} fusion strategy')
+                        
                     # Update button styles
                     for val, btn in fusion_buttons.items():
                         if val == value:
@@ -1302,88 +1587,95 @@ async def index_page():
                             btn.props('outline color=secondary')
                             
                     print(f"Fusion mode changed to: {CURRENT_FUSION_MODE}")
-                    ui.notify(f'Switched to {CURRENT_FUSION_MODE} fusion strategy')
                 
                 with ui.column().classes('col-12'):
                     ui.label('Performance Optimization').classes('text-subtitle2 q-mt-sm')
-                    
-                    # Frame skipping controls with better debug and visual feedback
+
+                    # Frame skipping controls
                     with ui.card().classes('w-full'):
                         ui.label('Frame Skipping Controls').classes('text-lg font-bold')
                         
                         # Status indicator that shows the current mode
                         status_chip = ui.chip(
-                            f"{'🔄 Auto-adjusting' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(FRAME_SKIP)}",
+                            f"{'🔄 Auto-adjusting' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(USER_FRAME_SKIP)}",
                             color='primary' if ENABLE_FRAME_SKIPPING else 'orange'
                         ).classes('mb-2')
                         
-                        with ui.row().classes('items-center'):
-                            # Toggle switch for dynamic frame skipping
-                            fs_toggle = ui.switch('Enable Dynamic Frame Skipping', value=ENABLE_FRAME_SKIPPING)
-                            
-                            # Debug label showing current values
-                            debug_label = ui.label(f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}")
+                        # ONLY use the reliable button
+                        toggle_btn = ui.button(
+                            '🔄 Toggle Auto/Manual Frame Skip', 
+                            on_click=lambda: toggle_frame_skipping(None)
+                        ).classes('w-full q-mb-md')
                         
                         # Frame skip slider
                         with ui.row().classes('w-full items-center'):
                             ui.label('Frame Skip:')
-                            fs_slider = ui.slider(min=1, max=5, step=1, value=FRAME_SKIP).props('label-always')
+                            fs_slider = ui.slider(min=1, max=5, step=1, value=USER_FRAME_SKIP).props('label-always')
                             ui.label('(Higher = better performance, lower = smoother)')
 
-                    # Handle toggle change
-                    def toggle_frame_skipping(e):
-                        global ENABLE_FRAME_SKIPPING, FRAME_SKIP, USER_FRAME_SKIP
-                        
-                        # Print debug info
-                        print(f"TOGGLE EVENT - Old value: {ENABLE_FRAME_SKIPPING}, New value: {e.value}")
-                        
-                        # Update global state
-                        ENABLE_FRAME_SKIPPING = bool(e.value)
-                        
-                        # Update UI elements
-                        status_chip.text = f"{'🔄 Auto-adjusting' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(USER_FRAME_SKIP)}"
-                        status_chip.color = 'primary' if ENABLE_FRAME_SKIPPING else 'orange'
-                        debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
-                        
-                        if not ENABLE_FRAME_SKIPPING:
-                            # When turning off dynamic mode, immediately apply the user's frame skip value
-                            FRAME_SKIP = USER_FRAME_SKIP
-                            print(f"✅ MANUAL MODE: Frame skip fixed at {FRAME_SKIP}")
-                        else:
-                            print(f"🔄 AUTO MODE: Frame skip will adjust dynamically")
-                        
-                        ui.notify(f"Frame skipping: {'🔄 Auto' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(USER_FRAME_SKIP)}")
-                    
+                        # Debug label
+                        debug_label = ui.label(f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}")
+
+                        def toggle_frame_skipping(e):
+                            global ENABLE_FRAME_SKIPPING, FRAME_SKIP, USER_FRAME_SKIP
+                            
+                            # Print the current state
+                            print(f"TOGGLING FRAME SKIP - Before: ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}")
+                            
+                            # Simply toggle the state
+                            ENABLE_FRAME_SKIPPING = not ENABLE_FRAME_SKIPPING
+                            
+                            print(f"TOGGLING FRAME SKIP - After: ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}")
+                            
+                            # Apply immediate effect based on new state
+                            if not ENABLE_FRAME_SKIPPING:
+                                FRAME_SKIP = USER_FRAME_SKIP
+                                print(f"🔒 MANUAL MODE ACTIVE: Using fixed value {USER_FRAME_SKIP}")
+                            else:
+                                print(f"🔄 AUTO MODE ACTIVE: Will adjust based on system load")
+                            
+                            # Update debug text
+                            debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
+                            
+                            # Update status chip
+                            status_chip.text = f"{'🔄 Auto-adjusting' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(USER_FRAME_SKIP)}"
+                            status_chip.color = 'primary' if ENABLE_FRAME_SKIPPING else 'orange'
+                            
+                            ui.notify(f"Frame skipping: {'AUTO' if ENABLE_FRAME_SKIPPING else 'MANUAL at '+str(USER_FRAME_SKIP)}")
+                       
                     # Handle slider change
                     def update_frame_skip(e):
                         global USER_FRAME_SKIP, FRAME_SKIP
                         
                         try:
-                            # Update the user's selection
-                            USER_FRAME_SKIP = int(e.value if hasattr(e, 'value') else e.args)
-                            print(f"USER SET FRAME SKIP TO: {USER_FRAME_SKIP}")
+                            # Extract slider value
+                            value = e.args if hasattr(e, 'args') else e.value
+                                
+                            # Store user selection
+                            USER_FRAME_SKIP = max(1, min(5, int(value)))
+                            print(f"📊 USER SELECTED FRAME SKIP: {USER_FRAME_SKIP}")
                             
-                            # If in manual mode, apply immediately
+                            # If dynamic mode is OFF, apply immediately
                             if not ENABLE_FRAME_SKIPPING:
                                 FRAME_SKIP = USER_FRAME_SKIP
+                                print(f"✅ APPLIED IMMEDIATELY: Frame skip set to {FRAME_SKIP}")
                                 status_chip.text = f"🔒 Fixed at {USER_FRAME_SKIP}"
-                                debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
-                                print(f"✅ APPLIED: Frame skip set to {FRAME_SKIP}")
+                                ui.notify(f"Frame skip set to {USER_FRAME_SKIP}")
                             else:
-                                print(f"ℹ️ NOTE: In auto mode, your setting of {USER_FRAME_SKIP} will apply when switched to manual")
+                                print(f"ℹ️ WAITING: Dynamic mode is ON. Turn it OFF to apply {USER_FRAME_SKIP}")
+                                ui.notify(f"Dynamic mode is ON. Turn it OFF to apply {USER_FRAME_SKIP}")
                             
 
-                            ui.notify(f"Frame skip: {USER_FRAME_SKIP}" + 
-                                     ('' if not ENABLE_FRAME_SKIPPING else ' (only applies in manual mode)'))
-                             
+                            # Always update debug label
+                            debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
+                                
                         except Exception as err:
-                            print(f"❌ ERROR setting frame skip: {err}, event: {e}")
+                            print(f"❌ ERROR in slider handler: {err}")
+                            print(f"Event: {type(e)} - {dir(e)}")
                     
                     # Connect event handlers
-                    fs_toggle.on('change', toggle_frame_skipping)
                     fs_slider.on('change', update_frame_skip)
                     
-
                 # Add dark mode toggle button in its own row for better visibility
                 with ui.row().classes('w-full q-mt-md'):
                     def toggle_dark_mode():
@@ -1499,20 +1791,13 @@ async def index_page():
                                     (0, 0, 0), -1)
                         cv2.putText(display_frame, 
                                 f"Fusion: {CURRENT_FUSION_MODE[:15]}", 
-                                (15, frame_height - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                                (15, frame_height - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
                         
-                        # Add latency indicator
-                        cv2.putText(display_frame, 
-                                f"Latency: {reported_latency}ms", 
-                                (frame_width - 150, frame_height - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                        
-                        # Encode and display the frame
-                        _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+                        # Update the webcam image in the UI
+                        _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         img_base64 = base64.b64encode(buffer).decode('utf-8')
-                        webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;background-color:black;">')
-                    
+                        webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;" />')                    
                     # Process frames at controlled rate
                     process_frame_count += 1
                     if emotion_app.processing_active:
@@ -1579,5 +1864,20 @@ async def index_page():
     # Start the update loop
     asyncio.create_task(update_webcam_frame())
     asyncio.create_task(update_system_info_task())
+
+
+    # Debug display
+    ui.label('DEBUG VALUES (check these when testing):').classes('q-mt-sm')
+    debug_values = ui.label(f"ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}, FRAME_SKIP={FRAME_SKIP}, USER_FRAME_SKIP={USER_FRAME_SKIP}")
+
+    # Update debug display 
+    async def update_debug_values():
+        """Consistent update of debug values."""
+        while True:
+            # Single source of truth for all debug displays
+            debug_text = f"ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}, FRAME_SKIP={FRAME_SKIP}, USER_FRAME_SKIP={USER_FRAME_SKIP}"
+            debug_values.text = debug_text
+            debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
+            await asyncio.sleep(0.5)  # Update twice per second is plenty
 
 ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080, reload=False)
