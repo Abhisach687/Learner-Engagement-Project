@@ -665,8 +665,8 @@ async def run_xgboost(hog_features, xgboost_models):
                     results[emotion] = np.array([0.25, 0.25, 0.25, 0.25])
                     continue
                 
-                # Debug output to check raw predictions
-                print(f"XGBoost raw prediction for {emotion}: {raw_pred}")
+                # REMOVE THIS DEBUG LINE that prints for every prediction
+                # print(f"XGBoost raw prediction for {emotion}: {raw_pred}")
                 
                 # Apply softmax with numerical stability
                 raw_pred = raw_pred - np.max(raw_pred)  # Subtract max for numerical stability
@@ -879,7 +879,7 @@ def determine_processing_rate():
 def adjust_frame_skip_by_latency(current_latency):
     """
     Dynamically adjust frame skip based on processing latency.
-    - Range: 2-48 frames
+    - Range: 2-28 frames
     - Immediately increases if latency > MAX_LATENCY_THRESHOLD
     - Gradually decreases if latency is consistently low
     """
@@ -891,7 +891,7 @@ def adjust_frame_skip_by_latency(current_latency):
         if current_latency > MAX_LATENCY_THRESHOLD * 1.5:
             FRAME_SKIP = min(28, FRAME_SKIP + 3)
         else:
-            FRAME_SKIP = min(28, FRAME_SKIP + 1)
+            FRAME_SKIP = min(8, FRAME_SKIP + 1)
         print(f"⚠️ High latency ({current_latency}ms) - increased skip to {FRAME_SKIP}")
         return
     
@@ -936,14 +936,38 @@ async def process_frame(frame, frame_count, frame_buffer, models):
     if len(frame_buffer) > FRAME_HISTORY:
         frame_buffer.pop(0)
     
-    # 3. Extract features for both models - HOG can be expensive
-    hog_features = extract_hog_features(frame)
-    
-    # 4. Run models with emotion-specific gated fusion
-    xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
+    # 3. Run MobileNet first (typically faster)
     mobilenet_probs = await run_pro_ensemble(frame_buffer, models['student'])
     
-    # 5. Apply fusion with reduced calls
+    # 4. Check if we need XGBoost for any emotion
+    need_xgboost = False
+    need_reasons = []
+    
+    for emotion in EMOTIONS:
+        mobilenet_conf = np.max(mobilenet_probs[emotion])
+        gate = EMOTION_GATES[emotion]
+        strategy = FUSION_STRATEGIES[emotion]
+        
+        if mobilenet_conf < gate and strategy != "mobilenet_only":
+            need_xgboost = True
+            need_reasons.append(f"{emotion}: conf={mobilenet_conf:.2f} < gate={gate}, strategy={strategy}")
+    
+    # Print detailed debug info about XGBoost decision (every 30 frames)
+    if frame_count % 30 == 0:
+        if need_xgboost:
+            print(f"Running XGBoost because: {', '.join(need_reasons)}")
+        else:
+            print(f"Skipping XGBoost - all confidences above thresholds")
+    
+    # 5. Only run XGBoost if needed
+    if need_xgboost:
+        hog_features = extract_hog_features(frame)
+        xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
+    else:
+        # Create empty predictions if not needed
+        xgboost_probs = {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
+    
+    # 6. Apply fusion with reduced calls
     emotion_predictions = {}
     for emotion in EMOTIONS:
         predicted_class = select_final_prediction(
@@ -965,7 +989,7 @@ async def process_frame(frame, frame_count, frame_buffer, models):
     
     # Additional logging - reduced frequency
     if frame_count % 100 == 0:
-        print(f"FRAME {frame_count}: Latency={current_latency}ms, Skip={FRAME_SKIP}")
+        print(f"FRAME {frame_count}: Latency={current_latency}ms, Skip={FRAME_SKIP}, XGBoost used={need_xgboost}")
     
     return emotion_predictions
 
