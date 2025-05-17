@@ -31,6 +31,7 @@ import queue
 import torch
 import xgboost as xgb
 import asyncio
+import random
 
 # Add a console log buffer to store recent messages
 CONSOLE_LOG_BUFFER = deque(maxlen=40000)  # Store last 40000 log messages
@@ -80,24 +81,12 @@ FUSION_STRATEGIES = {
     "Frustration": "gated_switch"     # Hard switch to XGBoost for very low confidence predictions
 }
 
-# Fusion modes that can be selected by the user
-FUSION_MODES = [
-    "emotion_specific_gated_fusion",  # Use emotion-specific strategies (default)
-    "mobilenet_only",                 # Use only MobileNet model
-    "xgboost_only",                  # Use only XGBoost model 
-    "weighted_fusion",               # Use weighted fusion (highest avg accuracy)
-    "mobilenet_confidence_gate"      # Use global confidence gate
-]
-
-# After the FUSION_MODES declaration, add these optimizations:
-
 # Optimization settings
-USER_FRAME_SKIP = 2           # User-selected frame skip from slider
-DYNAMIC_FRAME_SKIP = 1        # Dynamic frame skip from system load
-FRAME_SKIP = 2                # Actual frame skip to apply
+FRAME_SKIP = 2               # Actual frame skip to apply
 ENABLE_FRAME_SKIPPING = True    # Enable dynamic frame skipping
-BATCH_PROCESSING = False        # Experimental: process frames in batches (not implemented yet)
 MIN_FRAME_TIME = 1/15           # Cap processing at 15 FPS
+MAX_LATENCY_THRESHOLD = 78      # Max latency for frame processing
+LATENCY_BUFFER = 20           # Buffer for latency smoothing
 
 # Currently selected fusion mode
 CURRENT_FUSION_MODE = "emotion_specific_gated_fusion"
@@ -785,7 +774,7 @@ async def run_pro_ensemble(frame_buffer, model_info):
 
 def select_final_prediction(mobilenet_probs, xgboost_probs, emotion):
     """
-    Apply fusion strategy based on the currently selected mode.
+    Apply emotion-specific gated fusion strategy.
     
     Args:
         mobilenet_probs: Probability distribution from MobileNet model
@@ -795,12 +784,6 @@ def select_final_prediction(mobilenet_probs, xgboost_probs, emotion):
     Returns:
         Predicted class after fusion
     """
-    global CURRENT_FUSION_MODE
-    
-    # Debugging - log the current mode periodically
-    if np.random.random() < 0.01:  # 1% chance to log (avoid log flood)
-        print(f"Current fusion mode active: {CURRENT_FUSION_MODE}")
-    
     # Get maximum probability and its class from MobileNet
     mobilenet_conf = np.max(mobilenet_probs)
     mobilenet_class = np.argmax(mobilenet_probs)
@@ -809,63 +792,31 @@ def select_final_prediction(mobilenet_probs, xgboost_probs, emotion):
     xgboost_conf = np.max(xgboost_probs)
     xgboost_class = np.argmax(xgboost_probs)
     
-    # Apply the appropriate fusion strategy based on the current mode
-    if CURRENT_FUSION_MODE == "mobilenet_only":
-        # Always use MobileNet prediction
-        return mobilenet_class
-        
-    elif CURRENT_FUSION_MODE == "xgboost_only":
-        # Always use XGBoost prediction
-        return xgboost_class
-        
-    elif CURRENT_FUSION_MODE == "weighted_fusion":
-        # Apply weighted fusion based on emotion type
-        weights = {
-            "Engagement": [0.6, 0.4],    # [MobileNet, XGBoost]
-            "Boredom": [0.3, 0.7],
-            "Confusion": [0.3, 0.7],
-            "Frustration": [0.3, 0.7]
-        }
-        
-        w1 = weights[emotion][0]
-        w2 = weights[emotion][1]
-        weighted_probs = w1 * mobilenet_probs + w2 * xgboost_probs
-        return np.argmax(weighted_probs)
-        
-    elif CURRENT_FUSION_MODE == "mobilenet_confidence_gate":
-        # Apply global confidence gate
-        if mobilenet_conf >= CONFIDENCE_GATE:
-            return mobilenet_class
-        else:
-            # If below threshold, use the one with higher confidence
-            return xgboost_class if xgboost_conf > mobilenet_conf else mobilenet_class
+    # Get the confidence gate for this emotion
+    gate = EMOTION_GATES[emotion]
     
-    else:  # Default to emotion_specific_gated_fusion
-        # Get the confidence gate for this emotion
-        gate = EMOTION_GATES[emotion]
-        
-        # Get the fusion strategy for this emotion
-        strategy = FUSION_STRATEGIES[emotion]
-        
-        # Apply the appropriate fusion strategy
-        if mobilenet_conf >= gate:
-            # If MobileNet confidence is above gate, use its prediction
+    # Get the fusion strategy for this emotion
+    strategy = FUSION_STRATEGIES[emotion]
+    
+    # Apply the appropriate fusion strategy
+    if mobilenet_conf >= gate:
+        # If MobileNet confidence is above gate, use its prediction
+        return mobilenet_class
+    else:
+        # Apply emotion-specific fusion strategy
+        if strategy == "mobilenet_only":
             return mobilenet_class
-        else:
-            # Apply emotion-specific fusion strategy
-            if strategy == "mobilenet_only":
-                return mobilenet_class
-                
-            elif strategy == "gated_blend":
-                blended_probs = 0.6 * mobilenet_probs + 0.4 * xgboost_probs
-                return np.argmax(blended_probs)
-                
-            elif strategy == "gated_weighted":
-                weighted_probs = 0.3 * mobilenet_probs + 0.7 * xgboost_probs
-                return np.argmax(weighted_probs)
-                
-            elif strategy == "gated_switch":
-                return xgboost_class
+            
+        elif strategy == "gated_blend":
+            blended_probs = 0.6 * mobilenet_probs + 0.4 * xgboost_probs
+            return np.argmax(blended_probs)
+            
+        elif strategy == "gated_weighted":
+            weighted_probs = 0.3 * mobilenet_probs + 0.7 * xgboost_probs
+            return np.argmax(weighted_probs)
+            
+        elif strategy == "gated_switch":
+            return xgboost_class
     
     # Fallback to MobileNet prediction
     return mobilenet_class
@@ -924,6 +875,35 @@ def determine_processing_rate():
         return "process_every_second_frame"
     else:
         return "process_every_frame"
+    
+def adjust_frame_skip_by_latency(current_latency):
+    """
+    Dynamically adjust frame skip based on processing latency.
+    - Range: 2-48 frames
+    - Immediately increases if latency > MAX_LATENCY_THRESHOLD
+    - Gradually decreases if latency is consistently low
+    """
+    global FRAME_SKIP
+    
+    # Fast path for high latency - immediate response
+    if current_latency > MAX_LATENCY_THRESHOLD:
+        # Aggressive increase - jump by 2 or more if latency is very high
+        if current_latency > MAX_LATENCY_THRESHOLD * 1.5:
+            FRAME_SKIP = min(28, FRAME_SKIP + 3)
+        else:
+            FRAME_SKIP = min(28, FRAME_SKIP + 1)
+        print(f"⚠️ High latency ({current_latency}ms) - increased skip to {FRAME_SKIP}")
+        return
+    
+    # If latency is good with room to spare, consider reducing frame skip
+    if current_latency < (MAX_LATENCY_THRESHOLD - LATENCY_BUFFER):
+        # Only reduce every few frames to avoid oscillation
+        if random.random() < 0.1:  # 10% chance to reduce (gradual)
+            FRAME_SKIP = max(2, FRAME_SKIP - 1)
+            print(f"✅ Good latency ({current_latency}ms) - decreased skip to {FRAME_SKIP}")
+    
+    # Otherwise maintain current frame skip
+    return
 
 
 # -------------------------------------------------------------------------
@@ -932,13 +912,10 @@ def determine_processing_rate():
 # Optimize the frame skipping logic with reduced overhead
 async def process_frame(frame, frame_count, frame_buffer, models):
     """Optimized processing function for a single frame."""
-    global last_processing_time, reported_latency, FRAME_SKIP, USER_FRAME_SKIP, ENABLE_FRAME_SKIPPING, results
+    global last_processing_time, reported_latency, FRAME_SKIP, results
     
-    # Calculate frame skip with minimal overhead
-    current_skip = FRAME_SKIP
-    
-    # Simple frame skip application with fast path 
-    if frame_count % max(1, current_skip) != 0:
+    # Simple frame skip application
+    if frame_count % max(1, FRAME_SKIP) != 0:
         return results  # Fast return for skipped frames
     
     # Throttle processing to maintain target framerate
@@ -962,19 +939,9 @@ async def process_frame(frame, frame_count, frame_buffer, models):
     # 3. Extract features for both models - HOG can be expensive
     hog_features = extract_hog_features(frame)
     
-    # 4. Run appropriate models based on fusion mode
-    if CURRENT_FUSION_MODE == 'xgboost_only':
-        # Only run XGBoost - skip MobileNet overhead
-        mobilenet_probs = {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
-        xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
-    elif CURRENT_FUSION_MODE == 'mobilenet_only':
-        # Only run MobileNet - skip XGBoost overhead
-        mobilenet_probs = await run_pro_ensemble(frame_buffer, models['student'])
-        xgboost_probs = {emo: np.array([0.25, 0.25, 0.25, 0.25]) for emo in EMOTIONS}
-    else:
-        # Run both models for fusion strategies
-        xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
-        mobilenet_probs = await run_pro_ensemble(frame_buffer, models['student'])
+    # 4. Run models with emotion-specific gated fusion
+    xgboost_probs = await run_xgboost(hog_features, models['xgboost'])
+    mobilenet_probs = await run_pro_ensemble(frame_buffer, models['student'])
     
     # 5. Apply fusion with reduced calls
     emotion_predictions = {}
@@ -990,22 +957,15 @@ async def process_frame(frame, frame_count, frame_buffer, models):
     
     # Update latency metrics
     last_processing_time = time.time()
-    reported_latency = int((last_processing_time - processing_start) * 1000)
+    current_latency = int((last_processing_time - processing_start) * 1000)
+    reported_latency = current_latency
     
-    # Adjust frame skip based on load (only in dynamic mode)
-    if ENABLE_FRAME_SKIPPING:
-        # Fast path for updating frame skip
-        current_rate = determine_processing_rate()
-        if current_rate == "process_every_third_frame":
-            FRAME_SKIP = 3
-        elif current_rate == "process_every_second_frame":
-            FRAME_SKIP = 2
-        else:
-            FRAME_SKIP = 1
+    # Adjust frame skip based on latency
+    adjust_frame_skip_by_latency(current_latency)
     
-    # Additional logging control - reduced frequency
+    # Additional logging - reduced frequency
     if frame_count % 100 == 0:
-        print(f"FRAME {frame_count}: Skip={FRAME_SKIP}, Dynamic={ENABLE_FRAME_SKIPPING}, User={USER_FRAME_SKIP}")
+        print(f"FRAME {frame_count}: Latency={current_latency}ms, Skip={FRAME_SKIP}")
     
     return emotion_predictions
 
@@ -1264,7 +1224,7 @@ class EmotionDetectionApp:
                 f.write("=" * 80 + "\n\n")
                 f.write(f"Device: {DEVICE}\n")
                 f.write(f"Fusion Mode: {CURRENT_FUSION_MODE}\n")
-                f.write(f"Frame Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}, User: {USER_FRAME_SKIP}\n")
+                f.write(f"Frame Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}\n")
                 f.write(f"Latency: {reported_latency}ms\n")
                 f.write(f"CPU: {get_cpu_utilization()}%, GPU: {get_gpu_utilization()}%\n")
                 f.write(f"Frame Buffer Size: {len(self.frame_buffer)}/{FRAME_HISTORY}\n\n")
@@ -1525,156 +1485,7 @@ async def index_page():
                     webcam_btn = ui.button('Start Webcam', on_click=emotion_app.start_webcam) \
                         .classes('button-primary')
                     ui.button('Stop Webcam', on_click=emotion_app.stop_webcam) \
-                        .classes('button-secondary')
-                # Inside the index_page() function, within the webcam controls section around line ~800
-                # After the "Stop Webcam" button:
-
-                with ui.column().classes('col-12'):
-                    ui.label('Fusion Strategy').classes('text-subtitle2 q-mt-sm')
-                                        
-                # Use buttons instead of radio/select for reliable selection
-                with ui.row().classes('w-full'):
-                    fusion_buttons = {}
-                    
-                    for label, value in [
-                        ('Emotion-specific Gated', 'emotion_specific_gated_fusion'),
-                        ('MobileNet Only', 'mobilenet_only'),
-                        ('XGBoost Only', 'xgboost_only'),
-                        ('Weighted Fusion', 'weighted_fusion'),
-                        ('Confidence Gate', 'mobilenet_confidence_gate')
-                    ]:
-                        # Create button for each option
-                        fusion_buttons[value] = ui.button(
-                            label, 
-                            on_click=lambda v=value: set_fusion_mode(v)
-                        ).classes('q-mr-xs q-mb-xs')
-                        
-                        # Style the default button
-                        if value == CURRENT_FUSION_MODE:
-                            fusion_buttons[value].props('color=primary')
-                        else:
-                            fusion_buttons[value].props('outline')
-        
-                # Function to handle fusion mode selection
-                def set_fusion_mode(value):
-                    global CURRENT_FUSION_MODE
-                    old_mode = CURRENT_FUSION_MODE
-                    CURRENT_FUSION_MODE = value
-                    
-                    # Only reset results for significant mode changes
-                    needs_reset = False
-                    
-                    # Only reset for major transitions that would cause prediction inconsistency
-                    if ((old_mode == 'xgboost_only' and value != 'xgboost_only') or
-                        (old_mode != 'xgboost_only' and value == 'xgboost_only')):
-                        needs_reset = True
-                        print(f"Major fusion mode change: {old_mode} -> {value}, partial reset needed")
-                    
-                    if needs_reset:
-                        # Only reset temporal smoothing, keep frame buffer
-                        global RESULTS_BUFFER
-                        RESULTS_BUFFER = deque(maxlen=SMOOTHING_WINDOW)
-                        
-                        # No need to clear frame buffer - that loses valuable temporal data
-                        # Just notify about the mode change
-                        ui.notify(f'Switched to {CURRENT_FUSION_MODE} fusion strategy')
-                        
-                    # Update button styles
-                    for val, btn in fusion_buttons.items():
-                        if val == value:
-                            btn.props('color=primary')
-                        else:
-                            btn.props('outline color=secondary')
-                            
-                    print(f"Fusion mode changed to: {CURRENT_FUSION_MODE}")
-                
-                with ui.column().classes('col-12'):
-                    ui.label('Performance Optimization').classes('text-subtitle2 q-mt-sm')
-
-                    # Frame skipping controls
-                    with ui.card().classes('w-full'):
-                        ui.label('Frame Skipping Controls').classes('text-lg font-bold')
-                        
-                        # Status indicator that shows the current mode
-                        status_chip = ui.chip(
-                            f"{'🔄 Auto-adjusting' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(USER_FRAME_SKIP)}",
-                            color='primary' if ENABLE_FRAME_SKIPPING else 'orange'
-                        ).classes('mb-2')
-                        
-                        # ONLY use the reliable button
-                        toggle_btn = ui.button(
-                            '🔄 Toggle Auto/Manual Frame Skip', 
-                            on_click=lambda: toggle_frame_skipping(None)
-                        ).classes('w-full q-mb-md')
-                        
-                        # Frame skip slider
-                        with ui.row().classes('w-full items-center'):
-                            ui.label('Frame Skip:')
-                            fs_slider = ui.slider(min=1, max=5, step=1, value=USER_FRAME_SKIP).props('label-always')
-                            ui.label('(Higher = better performance, lower = smoother)')
-
-                        # Debug label
-                        debug_label = ui.label(f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}")
-
-                        def toggle_frame_skipping(e):
-                            global ENABLE_FRAME_SKIPPING, FRAME_SKIP, USER_FRAME_SKIP
-                            
-                            # Print the current state
-                            print(f"TOGGLING FRAME SKIP - Before: ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}")
-                            
-                            # Simply toggle the state
-                            ENABLE_FRAME_SKIPPING = not ENABLE_FRAME_SKIPPING
-                            
-                            print(f"TOGGLING FRAME SKIP - After: ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}")
-                            
-                            # Apply immediate effect based on new state
-                            if not ENABLE_FRAME_SKIPPING:
-                                FRAME_SKIP = USER_FRAME_SKIP
-                                print(f"🔒 MANUAL MODE ACTIVE: Using fixed value {USER_FRAME_SKIP}")
-                            else:
-                                print(f"🔄 AUTO MODE ACTIVE: Will adjust based on system load")
-                            
-                            # Update debug text
-                            debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
-                            
-                            # Update status chip
-                            status_chip.text = f"{'🔄 Auto-adjusting' if ENABLE_FRAME_SKIPPING else '🔒 Fixed at '+str(USER_FRAME_SKIP)}"
-                            status_chip.color = 'primary' if ENABLE_FRAME_SKIPPING else 'orange'
-                            
-                            ui.notify(f"Frame skipping: {'AUTO' if ENABLE_FRAME_SKIPPING else 'MANUAL at '+str(USER_FRAME_SKIP)}")
-                       
-                    # Handle slider change
-                    def update_frame_skip(e):
-                        global USER_FRAME_SKIP, FRAME_SKIP
-                        
-                        try:
-                            # Extract slider value
-                            value = e.args if hasattr(e, 'args') else e.value
-                                
-                            # Store user selection
-                            USER_FRAME_SKIP = max(1, min(5, int(value)))
-                            print(f"📊 USER SELECTED FRAME SKIP: {USER_FRAME_SKIP}")
-                            
-                            # If dynamic mode is OFF, apply immediately
-                            if not ENABLE_FRAME_SKIPPING:
-                                FRAME_SKIP = USER_FRAME_SKIP
-                                print(f"✅ APPLIED IMMEDIATELY: Frame skip set to {FRAME_SKIP}")
-                                status_chip.text = f"🔒 Fixed at {USER_FRAME_SKIP}"
-                                ui.notify(f"Frame skip set to {USER_FRAME_SKIP}")
-                            else:
-                                print(f"ℹ️ WAITING: Dynamic mode is ON. Turn it OFF to apply {USER_FRAME_SKIP}")
-                                ui.notify(f"Dynamic mode is ON. Turn it OFF to apply {USER_FRAME_SKIP}")
-                            
-
-                            # Always update debug label
-                            debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
-                                
-                        except Exception as err:
-                            print(f"❌ ERROR in slider handler: {err}")
-                            print(f"Event: {type(e)} - {dir(e)}")
-                    
-                    # Connect event handlers
-                    fs_slider.on('change', update_frame_skip)
+                        .classes('button-secondary')                                     
                     
                 # Add dark mode toggle button in its own row for better visibility
                 with ui.row().classes('w-full q-mt-md'):
@@ -1753,49 +1564,9 @@ async def index_page():
                     current_time = time.time()
                     if current_time - last_display_time >= 1/DISPLAY_FPS:
                         last_display_time = current_time
-                        
-                        # Create a copy of the frame for display with overlays
-                        display_frame = frame.copy()
-                        
-                        # Draw emotion states on the display frame
-                        y_pos = 30
-                        frame_height, frame_width = display_frame.shape[:2]
-                        
-                        for emotion in EMOTIONS:
-                            value = results[emotion]
-                            label = get_emotion_label(value, emotion)
-                            
-                            icon_text = {
-                                "Engagement": "1",
-                                "Boredom": "2", 
-                                "Confusion": "3",
-                                "Frustration": "4"
-                            }[emotion]
-                            
-                            text = f"{icon_text}: {emotion} - {label}"
-                            
-                            text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                            cv2.rectangle(display_frame, 
-                                        (10, y_pos - 15), 
-                                        (min(frame_width - 10, 10 + text_size[0] + 10), y_pos + 5),
-                                        (240, 240, 240), -1)
-                            
-                            cv2.putText(display_frame, text, (15, y_pos), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
-                            y_pos += 25
-                        
-                        # Add fusion mode indicator with better visibility
-                        cv2.rectangle(display_frame, 
-                                    (10, frame_height - 25), 
-                                    (220, frame_height - 5),
-                                    (0, 0, 0), -1)
-                        cv2.putText(display_frame, 
-                                f"Fusion: {CURRENT_FUSION_MODE[:15]}", 
-                                (15, frame_height - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-                        
+
                         # Update the webcam image in the UI
-                        _, buffer = cv2.imencode('.jpg', display_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
                         img_base64 = base64.b64encode(buffer).decode('utf-8')
                         webcam_image.set_content(f'<img src="data:image/jpeg;base64,{img_base64}" style="width:100%;height:100%;object-fit:contain;" />')                    
                     # Process frames at controlled rate
@@ -1865,19 +1636,5 @@ async def index_page():
     asyncio.create_task(update_webcam_frame())
     asyncio.create_task(update_system_info_task())
 
-
-    # Debug display
-    ui.label('DEBUG VALUES (check these when testing):').classes('q-mt-sm')
-    debug_values = ui.label(f"ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}, FRAME_SKIP={FRAME_SKIP}, USER_FRAME_SKIP={USER_FRAME_SKIP}")
-
-    # Update debug display 
-    async def update_debug_values():
-        """Consistent update of debug values."""
-        while True:
-            # Single source of truth for all debug displays
-            debug_text = f"ENABLE_FRAME_SKIPPING={ENABLE_FRAME_SKIPPING}, FRAME_SKIP={FRAME_SKIP}, USER_FRAME_SKIP={USER_FRAME_SKIP}"
-            debug_values.text = debug_text
-            debug_label.text = f"Skip: {FRAME_SKIP}, Dynamic: {ENABLE_FRAME_SKIPPING}"
-            await asyncio.sleep(0.5)  # Update twice per second is plenty
 
 ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080, reload=False)
