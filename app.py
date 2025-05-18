@@ -82,11 +82,11 @@ FUSION_STRATEGIES = {
 }
 
 # Optimization settings
-FRAME_SKIP = 6               # Actual frame skip to apply
+FRAME_SKIP = 8              # Actual frame skip to apply
 ENABLE_FRAME_SKIPPING = True    # Enable dynamic frame skipping
-MIN_FRAME_TIME = 1/12           # Cap processing at 12 FPS
-MAX_LATENCY_THRESHOLD = 75      # Max latency for frame processing
-LATENCY_BUFFER = 15          # Buffer for latency smoothing
+MIN_FRAME_TIME = 1/8          # Cap processing at 8 FPS
+MAX_LATENCY_THRESHOLD = 70      # Max latency for frame processing
+LATENCY_BUFFER = 20         # Buffer for latency smoothing
 
 # Currently selected fusion mode
 CURRENT_FUSION_MODE = "emotion_specific_gated_fusion"
@@ -1637,17 +1637,11 @@ async def index_page():
         
         
     async def update_system_info_task():
-        """Separate task to update system information with improved UI updates"""
+        """Separate task to update system information regardless of webcam status"""
         global reported_latency
-        
-        # Add a counter for debugging
-        update_count = 0
         
         while True:
             try:
-                # Update count for debugging
-                update_count += 1
-                
                 # Get fresh system metrics
                 cpu_usage = get_cpu_utilization()
                 gpu_usage = get_gpu_utilization()
@@ -1657,49 +1651,54 @@ async def index_page():
                 emotion_app.system_info["gpu"] = gpu_usage
                 emotion_app.system_info["processing_rate"] = f"Frame Skip: {FRAME_SKIP}"
                 
-                # Force UI updates with both direct assignment and JavaScript
-                # Direct UI updates (primary method)
-                cpu_label.text = f'CPU: {cpu_usage}%'
-                gpu_label.text = f'GPU: {gpu_usage}%'
-                processing_label.text = f'Frame Skip: {FRAME_SKIP}'
-                latency_label.text = f'Frame Latency: {reported_latency}ms'
-                
-                # Backup update method using JavaScript (in case direct updates fail)
-                if update_count % 5 == 0:  # Less frequent to reduce overhead
+                # Direct UI updates - keep it simple
+                try:
+                    # Use JavaScript for reliable UI updates
+                    ui.run_javascript(f"""
+                        document.querySelector('label:contains("CPU:")').innerText = 'CPU: {cpu_usage}%';
+                        document.querySelector('label:contains("GPU:")').innerText = 'GPU: {gpu_usage}%';
+                        document.querySelector('label:contains("Frame Skip:")').innerText = 'Frame Skip: {FRAME_SKIP}';
+                        document.querySelector('label:contains("Frame Latency:")').innerText = 'Frame Latency: {reported_latency}ms';
+                    """)
+                except:
+                    # Fallback to direct property updates
                     try:
-                        ui.run_javascript(f"""
-                            try {{
-                                document.querySelector('label:contains("CPU:")').textContent = 'CPU: {cpu_usage}%';
-                                document.querySelector('label:contains("GPU:")').textContent = 'GPU: {gpu_usage}%';
-                                document.querySelector('label:contains("Frame Skip:")').textContent = 'Frame Skip: {FRAME_SKIP}';
-                                document.querySelector('label:contains("Frame Latency:")').textContent = 'Frame Latency: {reported_latency}ms';
-                            }} catch(e) {{
-                                console.log("UI update error:", e);
-                            }}
-                        """)
-                    except Exception as js_err:
-                        # Just ignore JavaScript errors, we still have the direct updates
-                        pass
+                        cpu_label.text = f'CPU: {cpu_usage}%'
+                        gpu_label.text = f'GPU: {gpu_usage}%'
+                        processing_label.text = f'Frame Skip: {FRAME_SKIP}'
+                        latency_label.text = f'Frame Latency: {reported_latency}ms'
+                    except:
+                        pass  # Silently fail if UI elements are not available
                         
-                # Log update every 30 seconds to confirm task is running
-                if update_count % 30 == 0:
+                # Log every 10 iterations to confirm task is running
+                if not hasattr(update_system_info_task, "counter"):
+                    update_system_info_task.counter = 0
+                update_system_info_task.counter += 1
+                
+                if update_system_info_task.counter % 10 == 0:
                     print(f"System info updated: CPU={cpu_usage}%, GPU={gpu_usage}%, Skip={FRAME_SKIP}, Latency={reported_latency}ms")
                     
             except Exception as e:
-                print(f"Error updating system info: {e}")
-                import traceback
-                traceback.print_exc()
+                # Simple error handling - don't add full traceback to keep logs clean
+                print(f"Error updating system info: {str(e)}")
             
-            # Update more frequently for responsive UI
+            # Use a slightly longer sleep to reduce overhead
             await asyncio.sleep(0.5)
         
 
-    # Create tasks and store references to prevent garbage collection
-    webcam_task = asyncio.create_task(update_webcam_frame())
-    system_info_task = asyncio.create_task(update_system_info_task())
-    
-   # Start the update loop
+    # Create tasks with explicit names
+    webcam_task = asyncio.create_task(update_webcam_frame(), name="webcam_updater")
+    system_info_task = asyncio.create_task(update_system_info_task(), name="system_info_updater")
+
+    # Store references globally to prevent garbage collection
+    app.webcam_task = webcam_task
+    app.system_info_task = system_info_task
+
+    # Also store on emotion_app for redundancy
     emotion_app.tasks = [webcam_task, system_info_task]
+
+    # Log task creation
+    print(f"Created async tasks: {webcam_task.get_name()}, {system_info_task.get_name()}")
 
 
 ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080, reload=False)
