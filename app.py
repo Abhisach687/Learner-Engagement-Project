@@ -82,11 +82,11 @@ FUSION_STRATEGIES = {
 }
 
 # Optimization settings
-FRAME_SKIP = 8              # Actual frame skip to apply
-ENABLE_FRAME_SKIPPING = True    # Enable dynamic frame skipping
-MIN_FRAME_TIME = 1/8          # Cap processing at 8 FPS
-MAX_LATENCY_THRESHOLD = 70      # Max latency for frame processing
-LATENCY_BUFFER = 20         # Buffer for latency smoothing
+FRAME_SKIP = 12              # Actual frame skip to apply
+ENABLE_FRAME_SKIPPING = False    # Enable dynamic frame skipping
+MIN_FRAME_TIME = 1/5         # Cap processing at 5 FPS
+MAX_LATENCY_THRESHOLD = 200      # Max latency for frame processing
+LATENCY_BUFFER = 50         # Buffer for latency smoothing
 
 # Currently selected fusion mode
 CURRENT_FUSION_MODE = "emotion_specific_gated_fusion"
@@ -124,7 +124,7 @@ RESULTS_BUFFER = deque(maxlen=SMOOTHING_WINDOW)
 
 # Display frame rate control
 DISPLAY_FPS = 30     # Target display FPS
-PROCESS_FPS = 10     # Process fewer frames for better performance
+PROCESS_FPS = 5     # Process fewer frames for better performance
 last_processing_time = 0
 last_frame = None    # Store latest frame for smoother display
 frame_counter = 0    # For FPS calculation
@@ -1406,6 +1406,16 @@ async def index_page():
                 height: 100%;
                 object-fit: cover;
             }
+        .emotion-card {
+             transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .emotion-card.updating {
+            transform: scale(1.02);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.12);
+        }
+        .emotion-meter {
+            transition: all 0.4s ease;
+        }
             
             /* Add this to existing CSS */
     [data-theme="dark"] .q-card {
