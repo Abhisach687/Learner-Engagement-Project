@@ -39,10 +39,10 @@ EMOTION_ICONS = {
 
 # Adjusted gates based on UI feedback and testing
 EMOTION_GATES = {
-    "Engagement": 0.15,  # Slightly higher for more stability
-    "Boredom": 0.40,     # Slightly lower to reduce frequent switches
-    "Confusion": 0.20,   # Higher threshold to improve fusion when needed
-    "Frustration": 0.25  # Higher threshold to leverage XGBoost more
+    "Engagement": 0.10, 
+    "Boredom": 0.45,    
+    "Confusion": 0.10,   
+    "Frustration": 0.10  
 }
 
 # Fusion strategies for each emotion
