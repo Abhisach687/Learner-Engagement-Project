@@ -82,11 +82,11 @@ FUSION_STRATEGIES = {
 }
 
 # Optimization settings
-FRAME_SKIP = 2               # Actual frame skip to apply
+FRAME_SKIP = 6               # Actual frame skip to apply
 ENABLE_FRAME_SKIPPING = True    # Enable dynamic frame skipping
-MIN_FRAME_TIME = 1/15           # Cap processing at 15 FPS
-MAX_LATENCY_THRESHOLD = 78      # Max latency for frame processing
-LATENCY_BUFFER = 20           # Buffer for latency smoothing
+MIN_FRAME_TIME = 1/12           # Cap processing at 12 FPS
+MAX_LATENCY_THRESHOLD = 75      # Max latency for frame processing
+LATENCY_BUFFER = 15          # Buffer for latency smoothing
 
 # Currently selected fusion mode
 CURRENT_FUSION_MODE = "emotion_specific_gated_fusion"
@@ -665,7 +665,7 @@ async def run_xgboost(hog_features, xgboost_models):
                     results[emotion] = np.array([0.25, 0.25, 0.25, 0.25])
                     continue
                 
-                # REMOVE THIS DEBUG LINE that prints for every prediction
+                # DEBUG LINE that prints for every prediction
                 # print(f"XGBoost raw prediction for {emotion}: {raw_pred}")
                 
                 # Apply softmax with numerical stability
@@ -879,31 +879,30 @@ def determine_processing_rate():
 def adjust_frame_skip_by_latency(current_latency):
     """
     Dynamically adjust frame skip based on processing latency.
-    - Range: 2-28 frames
-    - Immediately increases if latency > MAX_LATENCY_THRESHOLD
-    - Gradually decreases if latency is consistently low
+    - Range: 2-16 frames
+    - More aggressive for high latency
+    - Very conservative decrease to avoid oscillation
     """
     global FRAME_SKIP
     
-    # Fast path for high latency - immediate response
-    if current_latency > MAX_LATENCY_THRESHOLD:
-        # Aggressive increase - jump by 2 or more if latency is very high
-        if current_latency > MAX_LATENCY_THRESHOLD * 1.5:
-            FRAME_SKIP = min(28, FRAME_SKIP + 3)
-        else:
-            FRAME_SKIP = min(8, FRAME_SKIP + 1)
-        print(f"⚠️ High latency ({current_latency}ms) - increased skip to {FRAME_SKIP}")
+    # Fast path for very high latency - immediate aggressive response
+    if current_latency > MAX_LATENCY_THRESHOLD * 1.5:  # Very high latency
+        FRAME_SKIP = min(16, FRAME_SKIP + 2)
+        print(f"High latency ({current_latency}ms) - increased skip to {FRAME_SKIP}")
         return
     
-    # If latency is good with room to spare, consider reducing frame skip
-    if current_latency < (MAX_LATENCY_THRESHOLD - LATENCY_BUFFER):
-        # Only reduce every few frames to avoid oscillation
-        if random.random() < 0.1:  # 10% chance to reduce (gradual)
-            FRAME_SKIP = max(2, FRAME_SKIP - 1)
-            print(f"✅ Good latency ({current_latency}ms) - decreased skip to {FRAME_SKIP}")
+    # Regular high latency case
+    elif current_latency > MAX_LATENCY_THRESHOLD:
+        FRAME_SKIP = min(16, FRAME_SKIP + 1)
+        print(f"High latency ({current_latency}ms) - increased skip to {FRAME_SKIP}")
+        return
     
-    # Otherwise maintain current frame skip
-    return
+    # If latency is good with substantial room to spare, consider reducing very rarely
+    if current_latency < (MAX_LATENCY_THRESHOLD - LATENCY_BUFFER * 2):  # Double buffer for safety
+        # Very conservative reduction - 2% chance to avoid oscillation
+        if random.random() < 0.02:  # 2% chance to reduce
+            FRAME_SKIP = max(2, FRAME_SKIP - 1)
+            print(f"Good latency ({current_latency}ms) - decreased skip to {FRAME_SKIP}")
 
 
 # -------------------------------------------------------------------------
@@ -1556,16 +1555,16 @@ async def index_page():
                 
                 with ui.row():
                     with ui.column().classes('col-4'):
-                        cpu_label = ui.label(f'CPU: {emotion_app.system_info["cpu"]}%')
-                        processing_label = ui.label(f'Processing: {emotion_app.system_info["processing_rate"]}')
+                        cpu_label = ui.label(f'CPU: {emotion_app.system_info["cpu"]}%').props('id=cpu_label')
+                        processing_label = ui.label(f'Processing: {emotion_app.system_info["processing_rate"]}').props('id=processing_label')
                     
                     with ui.column().classes('col-4'):
-                        gpu_label = ui.label(f'GPU: {emotion_app.system_info["gpu"]}%')
-                        device_label = ui.label(f'Device: {DEVICE}')
+                        gpu_label = ui.label(f'GPU: {emotion_app.system_info["gpu"]}%').props('id=gpu_label')
+                        device_label = ui.label(f'Device: {DEVICE}').props('id=device_label')
                     
                     with ui.column().classes('col-4'):
-                        latency_label = ui.label(f'Frame Latency: {reported_latency}ms')
-                        
+                        latency_label = ui.label(f'Frame Latency: {reported_latency}ms').props('id=latency_label')
+
 
     async def update_webcam_frame():
         """Optimized function to update webcam feed and process frames at different rates."""
@@ -1638,27 +1637,69 @@ async def index_page():
         
         
     async def update_system_info_task():
-        """Separate task to update system information regardless of webcam status"""
+        """Separate task to update system information with improved UI updates"""
         global reported_latency
+        
+        # Add a counter for debugging
+        update_count = 0
         
         while True:
             try:
-                # Update system info
-                emotion_app.update_system_info()
-                cpu_label.text = f'CPU: {emotion_app.system_info["cpu"]}%'
-                gpu_label.text = f'GPU: {emotion_app.system_info["gpu"]}%'
-                processing_label.text = f'Processing: {emotion_app.system_info["processing_rate"]}'
+                # Update count for debugging
+                update_count += 1
                 
-                # Update latency with the actual measured value
+                # Get fresh system metrics
+                cpu_usage = get_cpu_utilization()
+                gpu_usage = get_gpu_utilization()
+                
+                # Update the app's system_info dictionary
+                emotion_app.system_info["cpu"] = cpu_usage
+                emotion_app.system_info["gpu"] = gpu_usage
+                emotion_app.system_info["processing_rate"] = f"Frame Skip: {FRAME_SKIP}"
+                
+                # Force UI updates with both direct assignment and JavaScript
+                # Direct UI updates (primary method)
+                cpu_label.text = f'CPU: {cpu_usage}%'
+                gpu_label.text = f'GPU: {gpu_usage}%'
+                processing_label.text = f'Frame Skip: {FRAME_SKIP}'
                 latency_label.text = f'Frame Latency: {reported_latency}ms'
+                
+                # Backup update method using JavaScript (in case direct updates fail)
+                if update_count % 5 == 0:  # Less frequent to reduce overhead
+                    try:
+                        ui.run_javascript(f"""
+                            try {{
+                                document.querySelector('label:contains("CPU:")').textContent = 'CPU: {cpu_usage}%';
+                                document.querySelector('label:contains("GPU:")').textContent = 'GPU: {gpu_usage}%';
+                                document.querySelector('label:contains("Frame Skip:")').textContent = 'Frame Skip: {FRAME_SKIP}';
+                                document.querySelector('label:contains("Frame Latency:")').textContent = 'Frame Latency: {reported_latency}ms';
+                            }} catch(e) {{
+                                console.log("UI update error:", e);
+                            }}
+                        """)
+                    except Exception as js_err:
+                        # Just ignore JavaScript errors, we still have the direct updates
+                        pass
+                        
+                # Log update every 30 seconds to confirm task is running
+                if update_count % 30 == 0:
+                    print(f"System info updated: CPU={cpu_usage}%, GPU={gpu_usage}%, Skip={FRAME_SKIP}, Latency={reported_latency}ms")
+                    
             except Exception as e:
                 print(f"Error updating system info: {e}")
+                import traceback
+                traceback.print_exc()
             
-            await asyncio.sleep(1)  # Update every second regardless of webcam
+            # Update more frequently for responsive UI
+            await asyncio.sleep(0.5)
         
-    # Start the update loop
-    asyncio.create_task(update_webcam_frame())
-    asyncio.create_task(update_system_info_task())
+
+    # Create tasks and store references to prevent garbage collection
+    webcam_task = asyncio.create_task(update_webcam_frame())
+    system_info_task = asyncio.create_task(update_system_info_task())
+    
+   # Start the update loop
+    emotion_app.tasks = [webcam_task, system_info_task]
 
 
 ui.run(title="Learning Engagement Monitor", favicon="🎓", port=8080, reload=False)
