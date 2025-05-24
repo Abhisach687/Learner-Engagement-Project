@@ -38,11 +38,21 @@ logs/
 *.jpg
 *.jpeg
 
+# Ignore all text files
+*.txt
+
 # Ignore all database files
 *.db
+
+# Ignore all JSON files
+*.json
+
+# other files to ignore
 classification_logs_summary.txt
 classification_reports.txt
 notebook_logs.txt
 notebooks/*.txt
+notebooks/images generated/*
 fusion*.json
 notebooks/extract_classification_reports.py
+metrics generated/*
