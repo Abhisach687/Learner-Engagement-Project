@@ -43,7 +43,6 @@ logs/
 classification_logs_summary.txt
 classification_reports.txt
 notebook_logs.txt
-notebooks/classification_reports_summary.txt
-notebooks/extract_data.py
+notebooks/*.txt
 fusion*.json
 notebooks/extract_classification_reports.py
