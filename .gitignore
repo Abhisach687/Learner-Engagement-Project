@@ -48,11 +48,5 @@ logs/
 *.json
 
 # other files to ignore
-classification_logs_summary.txt
-classification_reports.txt
-notebook_logs.txt
-notebooks/*.txt
-notebooks/images generated/*
-fusion*.json
-notebooks/extract_classification_reports.py
+
 metrics generated/*
