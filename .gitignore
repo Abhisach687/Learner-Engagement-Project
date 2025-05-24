@@ -48,5 +48,4 @@ logs/
 *.json
 
 # other files to ignore
-
 metrics generated/*
